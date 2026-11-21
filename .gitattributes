@@ -3,3 +3,7 @@
 *.md  text eol=lf
 *.sh      text eol=lf
 *.command text eol=lf
+
+examples/** linguist-documentation=false
+*.c linguist-detectable=true
+*.cpp linguist-detectable=true
