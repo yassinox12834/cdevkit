@@ -1,9 +1,18 @@
-*.bat text eol=crlf
-*.py  text eol=lf
-*.md  text eol=lf
+# Line endings
+*.bat     text eol=crlf
+*.py      text eol=lf
+*.md      text eol=lf
 *.sh      text eol=lf
 *.command text eol=lf
 
+# GitHub language statistics
+# Count the example programs: GitHub ignores folders named examples/ by default.
 examples/** linguist-documentation=false
-*.c linguist-detectable=true
+*.c   linguist-detectable=true
 *.cpp linguist-detectable=true
+
+# .command files (macOS launchers) are shell scripts, but GitHub does not recognise the extension.
+*.command linguist-language=Shell
+
+# Optional: also count Markdown. Remove the # on the next line if you want it in the bar.
+# *.md linguist-detectable=true
