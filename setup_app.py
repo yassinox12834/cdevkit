@@ -1,6 +1,6 @@
 """C/C++ DevKit Setup: install packs, configure them, verify the toolchain.
 
-Run with setup.bat (Windows) or:  python setup_app.py
+Run with setup.bat (Windows), setup.command (macOS), ./setup.sh (Linux), or:  python setup_app.py
 """
 
 from __future__ import annotations
@@ -9,19 +9,21 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from tkinter import filedialog
 
-import customtkinter as ctk
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QButtonGroup, QCheckBox, QComboBox, QFileDialog, QGridLayout, QHBoxLayout, QLineEdit, QMainWindow,
+    QProgressBar, QPushButton, QScrollArea, QSplitter, QStackedWidget, QVBoxLayout, QWidget,
+)
 
-from devkit import __version__, configure, system, toolchain, ui
+from devkit import __version__, configure, system, toolchain
+from devkit import qt as ui
 from devkit.installer import Installer
 from devkit.packs import ALL_COMPONENTS, PACKS, Component, Pack
 from devkit.project_template import create_project
 from devkit.vscode_settings import apply_toolchain_settings
 
 HERE = Path(__file__).resolve().parent
-
-BG_TRANSPARENT = "transparent"
 
 METHOD_LABEL = {"winget": "winget", "msys": "MSYS2", "brew": "Homebrew", "cask": "Homebrew",
                 "special": "macOS", "script": "repository", "vscode": "VS Code"}
@@ -46,155 +48,180 @@ VERIFY_TOOLS = [
 ]
 
 
-class SetupApp:
+class SetupWindow(QMainWindow):
     def __init__(self):
-        self.root = ui.init_app("C/C++ DevKit Setup", "1180x780", (1000, 660))
+        super().__init__()
+        self.setWindowTitle("C/C++ DevKit Setup")
+        self.resize(1180, 800)
+        self.setMinimumSize(980, 640)
+
         self.status: dict[str, bool] = {}
-        self.rows: dict[str, tuple[ui.Dot, ctk.CTkButton]] = {}
-        self.pack_buttons: dict[str, ctk.CTkButton] = {}
-        self.actions: list[ctk.CTkButton] = []
+        self.rows: dict[str, tuple[ui.Dot, QPushButton]] = {}
+        self.pack_buttons: dict[str, QPushButton] = {}
+        self.actions: list[QPushButton] = []
 
-        self.root.grid_columnconfigure(1, weight=1)
-        self.root.grid_rowconfigure(0, weight=1)
-        self._build_sidebar()
+        root = QWidget()
+        self.setCentralWidget(root)
+        outer = QHBoxLayout(root)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        outer.addWidget(self._build_sidebar())
 
-        main = ctk.CTkFrame(self.root, fg_color=BG_TRANSPARENT)
-        main.grid(row=0, column=1, sticky="nsew", padx=(0, 18), pady=18)
-        main.grid_columnconfigure(0, weight=1)
-        main.grid_rowconfigure(0, weight=1)
+        main = QWidget()
+        main_lay = QVBoxLayout(main)
+        main_lay.setContentsMargins(22, 18, 22, 18)
+        main_lay.setSpacing(10)
+        outer.addWidget(main, 1)
 
-        self.pages_host = ctk.CTkFrame(main, fg_color=BG_TRANSPARENT)
-        self.pages_host.grid(row=0, column=0, sticky="nsew")
-        self.pages_host.grid_columnconfigure(0, weight=1)
-        self.pages_host.grid_rowconfigure(0, weight=1)
-
-        bottom = ctk.CTkFrame(main, fg_color=BG_TRANSPARENT)
-        bottom.grid(row=1, column=0, sticky="ew", pady=(14, 0))
-        bottom.grid_columnconfigure(0, weight=1)
-        status_row = ctk.CTkFrame(bottom, fg_color=BG_TRANSPARENT)
-        status_row.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        status_row.grid_columnconfigure(1, weight=1)
-        self.status_label = ui.label(status_row, "Ready", "small", ui.MUTED)
-        self.status_label.grid(row=0, column=0, sticky="w")
-        self.progress = ctk.CTkProgressBar(status_row, height=4, progress_color=ui.ACCENT, fg_color=ui.BORDER,
-                                           mode="determinate")
-        self.progress.grid(row=0, column=1, sticky="ew", padx=(14, 0))
-        self.progress.set(0)
-        self.console = ui.Console(bottom, "Log", height=120)
-        self.console.grid(row=1, column=0, sticky="ew")
-
-        self.tasks = ui.TaskRunner(self.root, self.console, self._on_busy)
+        self.stack = QStackedWidget()
+        log_frame, self.console = ui.console_panel("Log")
+        self.tasks = ui.TaskRunner(self.console)
+        self.tasks.busy_changed.connect(self._on_busy)
         self.installer = Installer(self.tasks.log)
         self.manager = self.installer.manager
+
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.setHandleWidth(10)
+        splitter.addWidget(self.stack)
+        bottom = QWidget()
+        bottom_lay = QVBoxLayout(bottom)
+        bottom_lay.setContentsMargins(0, 0, 0, 0)
+        bottom_lay.setSpacing(6)
+        self.status_label = ui.label("Ready", "muted")
+        self.progress = QProgressBar()
+        self.progress.setTextVisible(False)
+        self.progress.setRange(0, 0)              # moving bar while busy
+        self.progress.hide()
+        bottom_lay.addWidget(ui.row(self.status_label, self.progress, stretch_end=False))
+        bottom_lay.addWidget(log_frame, 1)
+        splitter.addWidget(bottom)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([560, 200])
+        main_lay.addWidget(splitter, 1)
 
         self.pages = {
             "packs": self._build_packs_page(),
             "configure": self._build_configure_page(),
             "verify": self._build_verify_page(),
         }
-        self.show("packs")
+        for page in self.pages.values():
+            self.stack.addWidget(page)
+        self.show_page("packs")
 
         if system.IS_LINUX and not self.manager:
-            self.console.write("warning: no apt, dnf or pacman found. Only VS Code extensions can be installed.", "warn")
+            self.console.write("warning: no apt, dnf or pacman found. Only VS Code extensions can be installed.")
         where = f"{system.PLATFORM_NAME} ({self.manager})" if self.manager else system.PLATFORM_NAME
         self.console.write(f"Detected {where}. Start with the Classic pack: GCC, CMake, Git and VS Code.", "muted")
         self.refresh_status()
 
     # ------------------------------------------------------------ layout
-    def _build_sidebar(self) -> None:
-        side = ctk.CTkFrame(self.root, fg_color=ui.SIDEBAR, corner_radius=0, width=230)
-        side.grid(row=0, column=0, sticky="nsw")
-        side.grid_propagate(False)
-        ui.label(side, "C/C++ DevKit", "title").pack(anchor="w", padx=22, pady=(24, 0))
-        ui.label(side, f"GCC toolchain for {system.PLATFORM_NAME}", "small", ui.MUTED).pack(anchor="w", padx=22, pady=(2, 26))
+    def _build_sidebar(self) -> QWidget:
+        side = QWidget()
+        side.setObjectName("sidebar")
+        side.setFixedWidth(220)
+        lay = QVBoxLayout(side)
+        lay.setContentsMargins(14, 22, 14, 16)
+        lay.setSpacing(2)
+        title = ui.label("C/C++ DevKit", "heading")
+        lay.addWidget(title)
+        lay.addWidget(ui.label(f"GCC toolchain for {system.PLATFORM_NAME}", "muted"))
+        lay.addSpacing(22)
 
-        self.nav: dict[str, ctk.CTkButton] = {}
+        self.nav: dict[str, QPushButton] = {}
+        group = QButtonGroup(side)
         for key, text in (("packs", "Packs"), ("configure", "Configure"), ("verify", "Verify")):
-            b = ctk.CTkButton(side, text=text, anchor="w", height=36, corner_radius=7, font=ui.font("body"),
-                              fg_color="transparent", hover_color=ui.SURFACE_2, text_color=ui.MUTED,
-                              command=lambda k=key: self.show(k))
-            b.pack(fill="x", padx=12, pady=2)
+            b = QPushButton(text)
+            b.setObjectName("nav")
+            b.setCheckable(True)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.clicked.connect(lambda _=False, k=key: self.show_page(k))
+            group.addButton(b)
+            lay.addWidget(b)
             self.nav[key] = b
 
-        ctk.CTkFrame(side, fg_color="transparent").pack(fill="both", expand=True)
-        ui.button(side, "Open code launcher", self.open_launcher, primary=True).pack(fill="x", padx=16, pady=(0, 10))
-        ui.label(side, f"v{__version__}", "small", ui.FAINT).pack(anchor="w", padx=22, pady=(0, 16))
+        lay.addStretch(1)
+        lay.addWidget(ui.button("Open code launcher", self.open_launcher, primary=True))
+        lay.addSpacing(8)
+        lay.addWidget(ui.label(f"v{__version__}", "faint"))
+        return side
 
-    def show(self, key: str) -> None:
-        for name, page in self.pages.items():
-            page.grid_forget() if name != key else page.grid(row=0, column=0, sticky="nsew")
-        for name, b in self.nav.items():
-            active = name == key
-            b.configure(fg_color=ui.SURFACE_2 if active else "transparent", text_color=ui.TEXT if active else ui.MUTED)
+    def show_page(self, key: str) -> None:
+        self.stack.setCurrentWidget(self.pages[key])
+        self.nav[key].setChecked(True)
 
-    def _page(self, title: str, subtitle: str) -> tuple[ctk.CTkFrame, ctk.CTkScrollableFrame]:
-        page = ctk.CTkFrame(self.pages_host, fg_color=BG_TRANSPARENT)
-        page.grid_columnconfigure(0, weight=1)
-        page.grid_rowconfigure(1, weight=1)
-        head = ctk.CTkFrame(page, fg_color=BG_TRANSPARENT)
-        head.grid(row=0, column=0, sticky="ew", pady=(0, 12))
-        head.grid_columnconfigure(0, weight=1)
-        ui.label(head, title, "title").grid(row=0, column=0, sticky="w")
-        ui.label(head, subtitle, "small", ui.MUTED).grid(row=1, column=0, sticky="w")
-        body = ctk.CTkScrollableFrame(page, fg_color=BG_TRANSPARENT, scrollbar_button_color=ui.BORDER,
-                                      scrollbar_button_hover_color=ui.FAINT)
-        body.grid(row=1, column=0, sticky="nsew")
-        body.grid_columnconfigure(0, weight=1)
-        page.head = head  # type: ignore[attr-defined]
-        return page, body
+    def _page(self, title: str, subtitle: str, *header_widgets) -> tuple[QWidget, QVBoxLayout]:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(12)
+        head_text = QWidget()
+        head_lay = QVBoxLayout(head_text)
+        head_lay.setContentsMargins(0, 0, 0, 0)
+        head_lay.setSpacing(2)
+        head_lay.addWidget(ui.label(title, "title"))
+        head_lay.addWidget(ui.label(subtitle, "muted"))
+        lay.addWidget(ui.row(head_text, "stretch", *header_widgets, stretch_end=False))
 
-    def _action(self, *args, **kwargs) -> ctk.CTkButton:
-        b = ui.button(*args, **kwargs)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        body = QWidget()
+        body_lay = QVBoxLayout(body)
+        body_lay.setContentsMargins(0, 0, 8, 0)
+        body_lay.setSpacing(12)
+        scroll.setWidget(body)
+        lay.addWidget(scroll, 1)
+        return page, body_lay
+
+    def _action(self, text: str, on_click, primary: bool = False) -> QPushButton:
+        b = ui.button(text, on_click, primary=primary)
         self.actions.append(b)
         return b
 
     # ------------------------------------------------------------- packs
-    def _build_packs_page(self) -> ctk.CTkFrame:
-        page, body = self._page("Packs", "Pick what to install. Already installed items are skipped.")
-        self._action(page.head, "Refresh status", self.refresh_status, width=130).grid(row=0, column=1, rowspan=2)
-
-        for i, pack in enumerate(PACKS):
-            c = ui.card(body)
-            c.grid(row=i, column=0, sticky="ew", pady=(0, 12), padx=(0, 6))
-            c.grid_columnconfigure(0, weight=1)
-
-            head = ctk.CTkFrame(c, fg_color="transparent")
-            head.grid(row=0, column=0, sticky="ew", padx=18, pady=(14, 8))
-            head.grid_columnconfigure(0, weight=1)
-            title_row = ctk.CTkFrame(head, fg_color="transparent")
-            title_row.grid(row=0, column=0, sticky="w")
-            ui.label(title_row, pack.title, "heading").pack(side="left")
-            if pack.recommended:
-                ctk.CTkLabel(title_row, text="RECOMMENDED", font=ui.font("label"), text_color=ui.ACCENT,
-                             fg_color=ui.SURFACE_2, corner_radius=5, padx=6).pack(side="left", padx=10)
-            ui.label(head, pack.subtitle, "small", ui.MUTED).grid(row=1, column=0, sticky="w")
-            pb = self._action(head, "Install pack", lambda p=pack: self.install_pack(p), primary=pack.recommended,
-                              width=120)
-            pb.grid(row=0, column=1, rowspan=2, sticky="e")
-            self.pack_buttons[pack.key] = pb
-
+    def _build_packs_page(self) -> QWidget:
+        page, body = self._page("Packs", "Pick what to install. Already installed items are skipped.",
+                                self._action("Refresh status", self.refresh_status))
+        for pack in PACKS:
             comps = pack.available(system.PLATFORM, self.manager)
-            for j, comp in enumerate(comps):
-                self._component_row(c, comp, j + 1, last=j == len(comps) - 1)
+            if not comps:
+                continue
+            frame, lay = ui.card()
+            title_row = [ui.label(pack.title, "heading")]
+            if pack.recommended:
+                title_row.append(ui.label("RECOMMENDED", "badge"))
+            pb = self._action("Install pack", lambda p=pack: self.install_pack(p), primary=pack.recommended)
+            self.pack_buttons[pack.key] = pb
+            text = QWidget()
+            text.setObjectName("row")
+            text_lay = QVBoxLayout(text)
+            text_lay.setContentsMargins(0, 0, 0, 0)
+            text_lay.setSpacing(2)
+            text_lay.addWidget(ui.row(*title_row))
+            text_lay.addWidget(ui.label(pack.subtitle, "muted"))
+            lay.addWidget(ui.row(text, "stretch", pb, stretch_end=False))
+            for comp in comps:
+                lay.addWidget(ui.divider())
+                lay.addWidget(self._component_row(comp))
+            body.addWidget(frame)
+        body.addStretch(1)
         return page
 
-    def _component_row(self, parent, comp: Component, row: int, last: bool) -> None:
-        ctk.CTkFrame(parent, height=1, fg_color=ui.BORDER).grid(row=row * 2 - 1, column=0, sticky="ew", padx=18)
-        r = ctk.CTkFrame(parent, fg_color="transparent")
-        r.grid(row=row * 2, column=0, sticky="ew", padx=18, pady=(6, 12 if last else 6))
-        r.grid_columnconfigure(2, weight=1)
-        r.grid_columnconfigure(0, minsize=48)
-        ui.tile(r, comp.mono, comp.category).grid(row=0, column=0, rowspan=2, sticky="w")
-        ui.label(r, comp.name, "body").grid(row=0, column=1, sticky="w")
+    def _component_row(self, comp: Component) -> QWidget:
         method = comp.source(system.PLATFORM, self.manager)[0]
-        ctk.CTkLabel(r, text=METHOD_LABEL.get(method, self.manager or ""), font=ui.font("small"),
-                     text_color=ui.FAINT).grid(row=0, column=2, sticky="w", padx=10)
-        dot = ui.Dot(r)
-        dot.grid(row=0, column=3, rowspan=2, padx=(0, 10))
-        ui.label(r, comp.summary, "small", ui.MUTED).grid(row=1, column=1, columnspan=2, sticky="w")
-        b = self._action(r, "Install", lambda c=comp: self.install_one(c), width=96)
-        b.grid(row=0, column=4, rowspan=2, sticky="e")
+        text = QWidget()
+        text.setObjectName("row")
+        t = QVBoxLayout(text)
+        t.setContentsMargins(0, 0, 0, 0)
+        t.setSpacing(1)
+        t.addWidget(ui.row(ui.label(comp.name), ui.label(METHOD_LABEL.get(method, self.manager or ""), "faint")))
+        t.addWidget(ui.label(comp.summary, "muted"))
+        dot = ui.Dot()
+        b = self._action("Install", lambda c=comp: self.install_one(c))
+        b.setFixedWidth(96)
         self.rows[comp.key] = (dot, b)
+        return ui.row(ui.tile(comp.mono, comp.category), text, "stretch", dot, b, spacing=12, stretch_end=False)
 
     def refresh_status(self) -> None:
         comps = [c for p in PACKS for c in p.available(system.PLATFORM, self.manager)]
@@ -209,11 +236,13 @@ class SetupApp:
         for key, (dot, b) in self.rows.items():
             ok = result.get(key, False)
             dot.set("ok" if ok else "missing")
-            b.configure(text="Installed" if ok else "Install")
+            b.setText("Installed" if ok else "Install")
         for pack in PACKS:
+            if pack.key not in self.pack_buttons:
+                continue
             comps = pack.available(system.PLATFORM, self.manager)
             missing = sum(not result.get(c.key) for c in comps)
-            self.pack_buttons[pack.key].configure(text="Installed" if missing == 0 else f"Install pack ({missing})")
+            self.pack_buttons[pack.key].setText("Installed" if missing == 0 else f"Install pack ({missing})")
         self._update_action_states()
 
     def install_one(self, comp: Component) -> None:
@@ -227,26 +256,23 @@ class SetupApp:
     def install_pack(self, pack: Pack) -> None:
         def job():
             done, failed = self.installer.install_pack(pack)
-            self.tasks.log(f"── {pack.title}: {done} ok, {failed} failed ──")
+            self.tasks.log(f"── {pack.title}: {done} ok, {failed} not done ──")
             if failed == 0:
                 self.tasks.log("✓ Done. Open a NEW terminal or restart VS Code so they see the new PATH.")
         self.tasks.run(f"Installing {pack.title}...", job, lambda _: self.refresh_status())
 
     # --------------------------------------------------------- configure
-    def _section(self, body, row: int, title: str, text: str) -> ctk.CTkFrame:
-        c = ui.card(body)
-        c.grid(row=row, column=0, sticky="ew", pady=(0, 12), padx=(0, 6))
-        c.grid_columnconfigure(0, weight=1)
-        ui.label(c, title, "heading").grid(row=0, column=0, sticky="w", padx=18, pady=(14, 0))
-        ui.label(c, text, "small", ui.MUTED, wraplength=760).grid(row=1, column=0, sticky="w", padx=18, pady=(2, 10))
-        inner = ctk.CTkFrame(c, fg_color="transparent")
-        inner.grid(row=2, column=0, sticky="ew", padx=18, pady=(0, 16))
-        return inner
+    def _section(self, body: QVBoxLayout, title: str, text: str) -> QVBoxLayout:
+        frame, lay = ui.card()
+        lay.addWidget(ui.label(title, "heading"))
+        lay.addWidget(ui.label(text, "muted", wrap=True))
+        lay.addSpacing(4)
+        body.addWidget(frame)
+        return lay
 
-    def _build_configure_page(self) -> ctk.CTkFrame:
+    def _build_configure_page(self) -> QWidget:
         page, body = self._page("Configure", "Settings applied after installing. Each button is safe to click twice.")
 
-        # Toolchain
         path_text = {
             "windows": "Puts GCC's folder on your PATH so every terminal and VS Code can find it, "
                        "and points VS Code's C/C++ extension at GCC.",
@@ -254,81 +280,82 @@ class SetupApp:
                      "and points VS Code's C/C++ extension at Homebrew's GCC instead of Apple Clang.",
             "linux": "Linux packages already land on PATH, so this only points VS Code's C/C++ extension at GCC.",
         }[system.PLATFORM]
-        t = self._section(body, 0, "Toolchain", path_text)
-        self.path_dot = ui.Dot(t)
-        self.path_dot.pack(side="left", padx=(0, 6))
-        self.path_label = ui.label(t, "", "small", ui.MUTED)
-        self.path_label.pack(side="left", padx=(0, 14))
+        t = self._section(body, "Toolchain", path_text)
+        self.path_dot = ui.Dot()
+        self.path_label = ui.label("", "muted")
+        widgets = [self.path_dot, self.path_label, "stretch"]
         if not system.IS_LINUX:
-            self._action(t, "Add to PATH", self.add_path).pack(side="left", padx=(0, 8))
-        self._action(t, "Configure VS Code for GCC", self.configure_vscode).pack(side="left")
+            widgets.append(self._action("Add to PATH", self.add_path))
+        widgets.append(self._action("Configure VS Code for GCC", self.configure_vscode))
+        t.addWidget(ui.row(*widgets, stretch_end=False))
         self._update_path_label()
 
-        # Git
-        g = self._section(body, 1, "Git identity",
-                          "Every commit is signed with this name and email. Use your GitHub email.")
-        g.grid_columnconfigure((0, 1), weight=1)
-        self.git_name = ui.entry(g, "Your name")
-        self.git_name.grid(row=0, column=0, sticky="ew", padx=(0, 8))
-        self.git_email = ui.entry(g, "you@example.com")
-        self.git_email.grid(row=0, column=1, sticky="ew", padx=(0, 8))
-        self._action(g, "Save identity", self.save_git_identity, primary=True).grid(row=0, column=2)
-        self._action(g, "Apply recommended Git settings", self.git_defaults).grid(
-            row=1, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        g = self._section(body, "Git identity", "Every commit is signed with this name and email. Use your GitHub email.")
+        self.git_name = QLineEdit()
+        self.git_name.setPlaceholderText("Your name")
+        self.git_email = QLineEdit()
+        self.git_email.setPlaceholderText("you@example.com")
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(8)
+        grid.addWidget(self.git_name, 0, 0)
+        grid.addWidget(self.git_email, 0, 1)
+        grid.addWidget(self._action("Save identity", self.save_git_identity, primary=True), 0, 2)
+        g.addLayout(grid)
+        g.addWidget(ui.row(self._action("Apply recommended Git settings", self.git_defaults)))
         self.tasks.run("Reading Git config...",
                        lambda: (configure.git_get("user.name"), configure.git_get("user.email")),
                        self._fill_git)
 
-        # GitHub
-        h = self._section(body, 2, "GitHub",
-                          "Sign in once with the GitHub CLI; Git then pushes without asking for a password. "
-                          "Needs GitHub CLI from the Extras pack.")
-        self._action(h, "Sign in to GitHub", lambda: configure.github_login(self.tasks.log), primary=True).pack(
-            side="left", padx=(0, 8))
-        self._action(h, "Check sign-in", lambda: self.tasks.run(
-            "Checking GitHub...", lambda: configure.github_status(self.tasks.log))).pack(side="left", padx=(0, 8))
-        self._action(h, "New repository on github.com", configure.open_new_repo_page).pack(side="left", padx=(0, 8))
-        self._action(h, "Install GitHub CLI", lambda: self.install_one(ALL_COMPONENTS["gh"])).pack(side="left")
+        h = self._section(body, "GitHub", "Sign in once with the GitHub CLI; Git then pushes without asking for "
+                                          "a password. Needs GitHub CLI from the Extras pack.")
+        h.addWidget(ui.row(
+            self._action("Sign in to GitHub", lambda: configure.github_login(self.tasks.log), primary=True),
+            self._action("Check sign-in", lambda: self.tasks.run(
+                "Checking GitHub...", lambda: configure.github_status(self.tasks.log))),
+            self._action("New repository on github.com", configure.open_new_repo_page),
+            self._action("Install GitHub CLI", lambda: self.install_one(ALL_COMPONENTS["gh"])),
+        ))
 
-        # New project
-        p = self._section(body, 3, "New project",
-                          "Creates a CMake project with VS Code build (Ctrl+Shift+B) and debug (F5) "
-                          "already set up, plus .clang-format, .gitignore and git init.")
-        p.grid_columnconfigure(1, weight=1)
-        ui.label(p, "Location", "small", ui.MUTED).grid(row=0, column=0, sticky="w", padx=(0, 10))
-        self.proj_dir = ui.entry(p, "Choose a parent folder")
-        self.proj_dir.grid(row=0, column=1, sticky="ew", padx=(0, 8))
-        ui.button(p, "Browse", self.pick_project_dir, width=80).grid(row=0, column=2)
-
-        ui.label(p, "Name", "small", ui.MUTED).grid(row=1, column=0, sticky="w", pady=(10, 0))
-        self.proj_name = ui.entry(p, "my_project")
-        self.proj_name.grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=(10, 0))
-
-        opts = ctk.CTkFrame(p, fg_color="transparent")
-        opts.grid(row=2, column=1, sticky="w", pady=(10, 0))
-        self.proj_lang = ctk.StringVar(value="C++")
-        self.proj_std = ctk.StringVar(value=toolchain.DEFAULT_STANDARD["cpp"])
-        ui.segmented(opts, ["C", "C++"], self.proj_lang, self._proj_lang_changed).pack(side="left", padx=(0, 10))
-        self.proj_std_menu = ui.option_menu(opts, toolchain.CPP_STANDARDS, self.proj_std, width=110)
-        self.proj_std_menu.pack(side="left", padx=(0, 10))
-        self.proj_open = ctk.BooleanVar(value=True)
-        ui.switch(opts, "Open in VS Code", self.proj_open).pack(side="left", padx=(6, 0))
-        self._action(p, "Create project", self.create_project, primary=True).grid(row=3, column=1, sticky="w",
-                                                                                  pady=(12, 0))
+        p = self._section(body, "New project", "Creates a CMake project with VS Code build (Ctrl+Shift+B) and "
+                                               "debug (F5) already set up, plus .clang-format, .gitignore and git init.")
+        self.proj_dir = QLineEdit()
+        self.proj_dir.setPlaceholderText("Choose a parent folder")
+        self.proj_name = QLineEdit()
+        self.proj_name.setPlaceholderText("my_project")
+        self.proj_lang = ui.Segmented(["C", "C++"], "C++")
+        self.proj_std = QComboBox()
+        self.proj_std.addItems(toolchain.CPP_STANDARDS)
+        self.proj_std.setCurrentText(toolchain.DEFAULT_STANDARD["cpp"])
+        self.proj_lang.changed.connect(self._proj_lang_changed)
+        self.proj_open = QCheckBox("Open in VS Code")
+        self.proj_open.setChecked(True)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(10)
+        grid.addWidget(ui.label("Location", "muted"), 0, 0)
+        grid.addWidget(self.proj_dir, 0, 1)
+        grid.addWidget(ui.button("Browse", self.pick_project_dir), 0, 2)
+        grid.addWidget(ui.label("Name", "muted"), 1, 0)
+        grid.addWidget(self.proj_name, 1, 1)
+        grid.addWidget(ui.row(self.proj_lang, self.proj_std, self.proj_open, spacing=12), 2, 1)
+        grid.addWidget(ui.row(self._action("Create project", self.create_project, primary=True)), 3, 1)
+        grid.setColumnStretch(1, 1)
+        p.addLayout(grid)
+        body.addStretch(1)
         return page
 
     def _fill_git(self, result) -> None:
         if isinstance(result, tuple):
             name, email = result
-            if name:
-                self.git_name.insert(0, name)
-            if email:
-                self.git_email.insert(0, email)
+            if name and not self.git_name.text():
+                self.git_name.setText(name)
+            if email and not self.git_email.text():
+                self.git_email.setText(email)
 
     def _update_path_label(self) -> None:
         state, text = system.path_status()
         self.path_dot.set(state)
-        self.path_label.configure(text=text)
+        self.path_label.setText(text)
 
     def add_path(self) -> None:
         self.tasks.run("Updating PATH...", lambda: system.configure_path(self.tasks.log),
@@ -337,11 +364,12 @@ class SetupApp:
     def configure_vscode(self) -> None:
         def job():
             self.installer.invalidate()
-            apply_toolchain_settings(self.tasks.log, use_clangd=self.installer.is_installed(ALL_COMPONENTS["ext-clangd"]))
+            apply_toolchain_settings(self.tasks.log,
+                                     use_clangd=self.installer.is_installed(ALL_COMPONENTS["ext-clangd"]))
         self.tasks.run("Configuring VS Code...", job)
 
     def save_git_identity(self) -> None:
-        name, email = self.git_name.get(), self.git_email.get()
+        name, email = self.git_name.text(), self.git_email.text()
         self.tasks.run("Saving Git identity...", lambda: configure.set_git_identity(name, email, self.tasks.log))
 
     def git_defaults(self) -> None:
@@ -349,23 +377,23 @@ class SetupApp:
 
     def _proj_lang_changed(self, value: str) -> None:
         lang = "c" if value == "C" else "cpp"
-        self.proj_std_menu.configure(values=toolchain.STANDARDS[lang])
-        self.proj_std.set(toolchain.DEFAULT_STANDARD[lang])
+        self.proj_std.clear()
+        self.proj_std.addItems(toolchain.STANDARDS[lang])
+        self.proj_std.setCurrentText(toolchain.DEFAULT_STANDARD[lang])
 
     def pick_project_dir(self) -> None:
-        folder = filedialog.askdirectory(title="Where should the project folder go?")
+        folder = QFileDialog.getExistingDirectory(self, "Where should the project folder go?")
         if folder:
-            self.proj_dir.delete(0, "end")
-            self.proj_dir.insert(0, folder)
+            self.proj_dir.setText(folder)
 
     def create_project(self) -> None:
-        parent = self.proj_dir.get().strip()
-        name = self.proj_name.get().strip() or "my_project"
+        parent = self.proj_dir.text().strip()
+        name = self.proj_name.text().strip() or "my_project"
         if not parent or not Path(parent).is_dir():
-            self.console.write("error: choose an existing parent folder first.", "err")
+            self.console.write("error: choose an existing parent folder first.")
             return
-        lang = "c" if self.proj_lang.get() == "C" else "cpp"
-        std, open_it = self.proj_std.get(), self.proj_open.get()
+        lang = "c" if self.proj_lang.value() == "C" else "cpp"
+        std, open_it = self.proj_std.currentText(), self.proj_open.isChecked()
 
         def job():
             dest = create_project(Path(parent), name, lang, std, self.tasks.log)
@@ -374,24 +402,28 @@ class SetupApp:
         self.tasks.run("Creating project...", job)
 
     # ------------------------------------------------------------ verify
-    def _build_verify_page(self) -> ctk.CTkFrame:
-        page, body = self._page("Verify", "Checks that each tool runs, then compiles and runs a test program.")
-        bar = ctk.CTkFrame(page.head, fg_color="transparent")
-        bar.grid(row=0, column=1, rowspan=2)
-        self._action(bar, "Check tools", self.check_tools).pack(side="left", padx=(0, 8))
-        self._action(bar, "Compile test programs", self.smoke_test, primary=True).pack(side="left")
-
-        c = ui.card(body)
-        c.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        c.grid_columnconfigure(2, weight=1)
-        self.verify_rows: dict[str, tuple[ui.Dot, ctk.CTkLabel]] = {}
+    def _build_verify_page(self) -> QWidget:
+        page, body = self._page("Verify", "Checks that each tool runs, then compiles and runs a test program.",
+                                self._action("Check tools", self.check_tools),
+                                self._action("Compile test programs", self.smoke_test, primary=True))
+        frame, lay = ui.card()
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(8)
+        self.verify_rows: dict[str, tuple[ui.Dot, object]] = {}
         for i, (title, _, _) in enumerate(VERIFY_TOOLS):
-            dot = ui.Dot(c)
-            dot.grid(row=i, column=0, padx=(18, 8), pady=(12 if i == 0 else 4, 12 if i == len(VERIFY_TOOLS) - 1 else 4))
-            ui.label(c, title, "body").grid(row=i, column=1, sticky="w", padx=(0, 20))
-            v = ui.label(c, "not checked", "mono", ui.FAINT)
-            v.grid(row=i, column=2, sticky="w", padx=(0, 18))
-            self.verify_rows[title] = (dot, v)
+            dot = ui.Dot()
+            value = ui.label("not checked", "faint")
+            value.setFont(ui.mono_font(9))
+            value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            grid.addWidget(dot, i, 0)
+            grid.addWidget(ui.label(title), i, 1)
+            grid.addWidget(value, i, 2)
+            self.verify_rows[title] = (dot, value)
+        grid.setColumnStretch(2, 1)
+        lay.addLayout(grid)
+        body.addWidget(frame)
+        body.addStretch(1)
         return page
 
     def check_tools(self) -> None:
@@ -417,9 +449,12 @@ class SetupApp:
             if not isinstance(results, dict):
                 return
             for title, (ok, text) in results.items():
-                dot, v = self.verify_rows[title]
+                dot, value = self.verify_rows[title]
                 dot.set("ok" if ok else "missing")
-                v.configure(text=text[:90], text_color=ui.TEXT if ok else ui.FAINT)
+                value.setText(text[:100])
+                value.setProperty("role", None if ok else "faint")
+                value.style().unpolish(value)
+                value.style().polish(value)
             found = sum(ok for ok, _ in results.values())
             self.console.write(f"{found}/{len(results)} tools found.", "ok" if found else "warn")
         self.tasks.run("Checking tools...", job, done)
@@ -436,10 +471,9 @@ class SetupApp:
             with tempfile.TemporaryDirectory() as tmp:
                 for lang, (fname, code) in programs.items():
                     info = toolchain.compiler_info(lang)
-                    compiler = info.path
                     if info.is_clang:
-                        self.tasks.log(f"warning: {compiler} is Clang, not GCC. Install GCC from the Classic pack.")
-                    if not compiler:
+                        self.tasks.log(f"warning: {info.path} is Clang, not GCC. Install GCC from the Classic pack.")
+                    if not info.path:
                         self.tasks.log(f"error: {toolchain.compiler_name(lang)} not found. Install the Classic pack.")
                         continue
                     src = Path(tmp) / fname
@@ -447,35 +481,31 @@ class SetupApp:
                     opts = toolchain.BuildOptions(language=lang, standard=toolchain.DEFAULT_STANDARD[lang])
                     out = toolchain.output_path(src)
                     out.parent.mkdir(exist_ok=True)
-                    if system.run_stream(toolchain.build_command(compiler, [src], out, opts), self.tasks.log, env=env) == 0:
+                    if system.run_stream(toolchain.build_command(info.path, [src], out, opts), self.tasks.log, env=env) == 0:
                         rc = system.run_stream([out], self.tasks.log, env=env)
                         self.tasks.log(f"✓ {lang.upper()} toolchain OK." if rc == 0 else f"error: test program failed ({rc}).")
         self.tasks.run("Compiling test programs...", job)
 
     # ------------------------------------------------------------ shared
     def _on_busy(self, busy: bool, text: str) -> None:
-        self.status_label.configure(text=text if busy else "Ready", text_color=ui.TEXT if busy else ui.MUTED)
-        if busy:
-            self.progress.configure(mode="indeterminate")
-            self.progress.start()
-        else:
-            self.progress.stop()
-            self.progress.configure(mode="determinate")
-            self.progress.set(0)
+        self.status_label.setText(text if busy else "Ready")
+        self.progress.setVisible(busy)
         self._update_action_states(busy)
 
     def _update_action_states(self, busy: bool | None = None) -> None:
         busy = self.tasks.busy if busy is None else busy
         for b in self.actions:
-            b.configure(state="disabled" if busy else "normal")
-        if not busy:
-            for key, (_, b) in self.rows.items():
-                if self.status.get(key):
-                    b.configure(state="disabled")
-            for pack in PACKS:
+            b.setEnabled(not busy)
+        if busy:
+            return
+        for key, (_, b) in self.rows.items():
+            if self.status.get(key):
+                b.setEnabled(False)
+        for pack in PACKS:
+            if pack.key in self.pack_buttons:
                 comps = pack.available(system.PLATFORM, self.manager)
                 if self.status and all(self.status.get(c.key) for c in comps):
-                    self.pack_buttons[pack.key].configure(state="disabled")
+                    self.pack_buttons[pack.key].setEnabled(False)
 
     def open_launcher(self) -> None:
         exe = sys.executable
@@ -484,10 +514,12 @@ class SetupApp:
         subprocess.Popen([exe, str(HERE / "launcher_app.py")], cwd=HERE)
 
 
-
-def main() -> ctk.CTk:
-    return SetupApp().root
+def main() -> int:
+    app = ui.create_app("C/C++ DevKit Setup")
+    window = SetupWindow()
+    window.show()
+    return app.exec()
 
 
 if __name__ == "__main__":
-    ui.run_app(main)
+    sys.exit(main())

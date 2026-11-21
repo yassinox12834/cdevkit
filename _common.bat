@@ -1,7 +1,7 @@
 @echo off
 rem Shared by setup.bat and launcher.bat. No .exe is built, so Windows SmartScreen never
 rem shows its "unrecognised app" warning.
-rem  1. If Python 3.10+ with Tkinter is installed, it is used.
+rem  1. If Python 3.10+ is installed, it is used.
 rem  2. Otherwise a private Python is downloaded into the .runtime folder with uv
 rem     (https://github.com/astral-sh/uv). Nothing is installed on the system:
 rem     delete this folder and everything is gone.
@@ -11,7 +11,7 @@ cd /d "%~dp0"
 
 rem ---- Already set up? -------------------------------------------------------
 if not exist ".venv\.deps-ok" goto choose
-".venv\Scripts\python.exe" -c "import customtkinter" >nul 2>nul && exit /b 0
+".venv\Scripts\python.exe" -c "import PySide6.QtWidgets" >nul 2>nul && exit /b 0
 echo The environment no longer works, probably because the folder was moved. Rebuilding it...
 rmdir /s /q ".venv"
 
@@ -19,12 +19,12 @@ rmdir /s /q ".venv"
 if exist ".venv" rmdir /s /q ".venv"
 set "PY="
 if "%CDEVKIT_PORTABLE%"=="1" goto portable
-py -3 -c "import sys,tkinter;sys.exit(sys.version_info<(3,10))" >nul 2>nul && set "PY=py -3"
-if not defined PY python -c "import sys,tkinter;sys.exit(sys.version_info<(3,10))" >nul 2>nul && set "PY=python"
+py -3 -c "import sys,venv;sys.exit(sys.version_info<(3,10))" >nul 2>nul && set "PY=py -3"
+if not defined PY python -c "import sys,venv;sys.exit(sys.version_info<(3,10))" >nul 2>nul && set "PY=python"
 if not defined PY goto portable
 
 rem ---- Installed Python ------------------------------------------------------
-echo Using your installed Python. Creating the environment, this takes about 30 seconds...
+echo Using your installed Python. Creating the environment, this takes a minute or two...
 %PY% -m venv .venv || goto venv_failed
 ".venv\Scripts\python.exe" -m pip install --disable-pip-version-check -q -r requirements.txt || goto pip_failed
 goto done
@@ -71,6 +71,6 @@ exit /b 1
 
 :pip_failed
 echo.
-echo Could not install CustomTkinter. Check your internet connection and run this file again.
+echo Could not install the Qt interface. Check your internet connection and run this file again.
 pause
 exit /b 1

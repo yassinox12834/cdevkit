@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Shared by setup.sh and launcher.sh (and the macOS .command files).
-#  1. If Python 3.10+ with Tkinter is installed, it is used.
+#  1. If Python 3.10+ is installed, it is used.
 #  2. Otherwise a private Python is downloaded into .runtime/ with uv
 #     (https://github.com/astral-sh/uv). Nothing is installed on the system:
 #     delete this folder and everything is gone.
@@ -18,7 +18,7 @@ fail() {
 
 # ---- Already set up? -----------------------------------------------------------
 if [ -f .venv/.deps-ok ]; then
-    if .venv/bin/python -c 'import customtkinter' 2>/dev/null; then
+    if .venv/bin/python -c 'import PySide6.QtWidgets' 2>/dev/null; then
         return 0 2>/dev/null || exit 0
     fi
     echo "The environment no longer works, probably because the folder was moved. Rebuilding it..."
@@ -31,14 +31,14 @@ if [ "${CDEVKIT_PORTABLE:-0}" != "1" ]; then
     for candidate in python3.13 python3.12 python3.11 python3.10 python3 \
                      /opt/homebrew/bin/python3 /usr/local/bin/python3; do
         if command -v "$candidate" >/dev/null 2>&1 &&
-           "$candidate" -c 'import sys, tkinter, venv, ensurepip; sys.exit(sys.version_info < (3, 10))' 2>/dev/null; then
+           "$candidate" -c 'import sys, venv, ensurepip; sys.exit(sys.version_info < (3, 10))' 2>/dev/null; then
             PY="$candidate"; break
         fi
     done
 fi
 
 if [ -n "$PY" ]; then
-    echo "Using your installed Python ($PY). Creating the environment, this takes about 30 seconds..."
+    echo "Using your installed Python ($PY). Creating the environment, this takes a minute or two..."
     if "$PY" -m venv .venv && .venv/bin/python -m pip install --disable-pip-version-check -q -r requirements.txt; then
         touch .venv/.deps-ok
         return 0 2>/dev/null || exit 0
@@ -88,5 +88,5 @@ export UV_PYTHON_INSTALL_DIR="$RT/python" UV_CACHE_DIR="$RT/cache" UV_PYTHON_PRE
 echo "Preparing Python 3.12..."
 "$RT/uv" venv .venv --python 3.12 --quiet || fail "Could not set up the private Python."
 "$RT/uv" pip install --python .venv/bin/python --quiet -r requirements.txt \
-    || fail "Could not install CustomTkinter. Check your internet connection and run this again."
+    || fail "Could not install the Qt interface. Check your internet connection and run this again."
 touch .venv/.deps-ok
