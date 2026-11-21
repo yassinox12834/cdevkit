@@ -6,8 +6,10 @@
 *.command text eol=lf
 
 # GitHub language statistics
-# Count the example programs: GitHub ignores folders named examples/ by default.
-examples/** linguist-documentation=false
+# GitHub treats folders named examples/ as documentation and skips them.
+# Force the example programs to count, with an explicit language per file.
+examples/c/*.c     linguist-language=C   linguist-documentation=false linguist-vendored=false
+examples/cpp/*.cpp linguist-language=C++ linguist-documentation=false linguist-vendored=false
 *.c   linguist-detectable=true
 *.cpp linguist-detectable=true
 
