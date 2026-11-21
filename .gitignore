@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+build/
+dist/
+*.zip
+.vscode/
+examples/**/*.bmp
+.runtime/
+pus.ps1

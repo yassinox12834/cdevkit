@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="320" viewBox="0 0 1280 320">
+  <defs>
+    <linearGradient id="line" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#3b82f6" stop-opacity="0"/>
+      <stop offset="0.5" stop-color="#3b82f6" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#3b82f6" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- black background, one thin blue rule at the bottom -->
+  <rect width="1280" height="320" fill="#07080a"/>
+  <rect x="0" y="316" width="1280" height="4" fill="url(#line)"/>
+
+  <!-- marks: two badges, outlined C and filled C++ -->
+  <g font-family="'Inter Display', Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-weight="800">
+    <rect x="300" y="104" width="112" height="112" rx="24" fill="none" stroke="#3b82f6" stroke-width="3"/>
+    <text x="356" y="186" text-anchor="middle" font-size="70" fill="#3b82f6">C</text>
+
+    <rect x="428" y="104" width="112" height="112" rx="24" fill="#3b82f6"/>
+    <text x="484" y="175" text-anchor="middle" font-size="42" letter-spacing="-0.5" fill="#07080a">C++</text>
+  </g>
+
+  <!-- name and systems -->
+  <g font-family="'Inter Display', Inter, 'Segoe UI', Helvetica, Arial, sans-serif">
+    <text x="580" y="176" font-size="68" font-weight="800" letter-spacing="-1.5" fill="#f2f4f7">C/C++ DevKit</text>
+    <text x="583" y="214" font-size="17" font-weight="600" letter-spacing="4" fill="#3b82f6">WINDOWS  ·  MACOS  ·  LINUX</text>
+  </g>
+</svg>
