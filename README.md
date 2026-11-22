@@ -22,7 +22,14 @@ A small Python app that sets up a complete **GCC** development environment for C
 | **macOS** | double-click `setup.command` | `launcher.command` |
 | **Linux** | `./setup.sh` | `./launcher.sh` |
 
-The first start looks for Python 3.10+. If it finds one, it uses it. If not, it downloads a private copy of Python (about 60 MB, once) into a `.runtime` folder inside the kit, using [uv](https://github.com/astral-sh/uv). Then it installs the Qt interface (PySide6, about 100 MB, once). Nothing is installed on your system: delete the folder and everything is gone. To always use the private copy, set the environment variable `CDEVKIT_PORTABLE=1`.
+The first start takes a minute or two:
+
+1. It looks for Python 3.10 or newer. If there is none, it downloads a private copy (about 60 MB, once) into a `.runtime` folder inside the kit, using [uv](https://github.com/astral-sh/uv). uv is pinned to one version and checked against its SHA-256 before it runs.
+2. It installs the Qt interface, PySide6, into a `.venv` folder inside the kit (75 MB on Windows, about 110 MB on macOS, once).
+
+Nothing is installed on your system: delete the folder and everything is gone. To always use the private Python, set the environment variable `CDEVKIT_PORTABLE=1`.
+
+**Updating:** replace the files (or `git pull`) and start the app as usual. When `requirements.txt` has changed, the environment is rebuilt automatically on the next start.
 
 There is deliberately **no .exe**. An unsigned .exe makes Windows SmartScreen show an "unrecognised app" warning, and avoiding that needs a paid code-signing certificate. Windows may still ask for confirmation once, because the zip came from the internet: to skip that, right-click the zip, choose **Properties**, tick **Unblock**, then extract. Cloning with `git clone` avoids it entirely. On macOS, if a `.command` file is blocked, right-click it and choose **Open**.
 
@@ -67,7 +74,7 @@ A **Cancel** button under the pages stops whatever is running, and any command t
 
 ## The launcher
 
-Open a `.c` or `.cpp` file, pick C or C++ and the standard (C89 to C23, C++98 to C++26), choose warnings and optimisation, then press **F5**. Double-click an error to jump to that line in VS Code. Standards your GCC is too old for are hidden. Crashes are explained in words (access violation, stack overflow, missing DLL...).
+Open a `.c` or `.cpp` file, pick C or C++ and the standard (C89 to C23, C++98 to C++26), choose warnings and optimisation, then press **F5**. The exact GCC command is shown above the output. Double-click an error to jump to that line in VS Code. Standards your GCC is too old for are hidden. Crashes are explained in words (access violation, stack overflow, missing DLL...).
 
 | Shortcut | Action |
 |---|---|
@@ -76,7 +83,9 @@ Open a `.c` or `.cpp` file, pick C or C++ and the standard (C89 to C23, C++98 to
 | `F5` | Run (rebuilds first if a source, an included header, an option or the compiler changed) |
 | `Shift+F5` | Stop the running program or the build |
 
-The executable goes into a `build/` folder next to your source file. For programs that read input (`scanf`, `std::cin`), switch on **Run in a separate terminal** or type the input in the Input box.
+The executable goes into a `build/` folder next to your source file, with a small `<name>.stamp.json` that records the command, the GCC version and the headers your code includes. That is how **F5** knows when to rebuild: changing `-O0` to `-O2`, a header in an `-Iinclude` folder or the compiler all trigger a new build, not only editing the `.c` or `.cpp` file.
+
+For programs that read input (`scanf`, `std::cin`), type the input in the **Input** box, or switch on **Run in a separate terminal**. A program that prints a lot does not slow the window down: if output arrives faster than it can be shown, the oldest waiting part is skipped and the log says so.
 
 ## Common problems
 
@@ -92,6 +101,27 @@ The executable goes into a `build/` folder next to your source file. For program
 | MSYS2 is not in `C:\msys64` | Set the environment variable `CDEVKIT_MSYS_ROOT` to its folder. |
 
 AddressSanitizer is not supported by MinGW GCC on Windows. The launcher's **Stop on undefined behaviour** option uses UBSan in trap mode, which works on every system.
+
+## Working on the code
+
+Run from source with your own Python 3.10+:
+
+```
+python -m venv .venv
+.venv/bin/pip install -r requirements.txt        # Windows: .venv\Scripts\pip
+.venv/bin/python setup_app.py                    # or launcher_app.py
+```
+
+Run the tests (103 of them, including GUI tests drawn off screen, so no window opens):
+
+```
+QT_QPA_PLATFORM=offscreen python -m unittest discover tests     # PowerShell: $env:QT_QPA_PLATFORM="offscreen"
+python tests/smoke.py                                           # needs GCC, CMake and Ninja
+```
+
+The GUI tests also measure how long the window stops responding while output floods in, so a freeze shows up as a failing test. CI runs everything on Windows, macOS and Linux with Python 3.10 and 3.13.
+
+PySide6 is kept below 6.12 in `requirements.txt`: version 6.12.0 crashes after about a thousand Qt callbacks on Python 3.10. Lift the cap once a 6.12.x release passes `tests/test_gui.py`.
 
 ## Project layout
 
@@ -117,11 +147,11 @@ tests/smoke.py        Builds and runs the hello examples with the real toolchain
 .github/workflows/    CI on Windows, macOS and Linux
 ```
 
-Settings for both apps are stored in `~/.cdevkit/`.
+Settings for both apps are stored in `~/.cdevkit/`. If an app crashes, the details are written to `~/.cdevkit/crash.log`.
 
 ## Why Qt and not an .exe
 
-The interface uses Qt through PySide6: native drawing, smooth scrolling, and installs and builds run in background threads so the window never freezes. It stays in Python on purpose. A compiled C++ interface would be an .exe, which brings back the SmartScreen warning, and the setup app's job is to install the compiler, so it cannot need one to start.
+Versions up to 1.1.0 used CustomTkinter, which redraws scrolling areas slowly enough to freeze the window. The interface now uses Qt through PySide6: native drawing and smooth scrolling. Installs and builds run in background threads, and their output reaches the window in small batches, so long jobs and chatty programs do not block it. It stays in Python on purpose. A compiled C++ interface would be an .exe, which brings back the SmartScreen warning, and the setup app's job is to install the compiler, so it cannot need one to start.
 
 ## Licence
 
