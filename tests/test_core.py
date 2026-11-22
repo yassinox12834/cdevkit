@@ -92,7 +92,7 @@ class ToolchainTests(unittest.TestCase):
             src.write_text(code)
             out = Path(tmp) / "ub"
             o = toolchain.BuildOptions(language="cpp", standard="c++20", ub_trap=True)
-            subprocess.run(toolchain.build_command("g++", [src], out, o), check=True)
+            subprocess.run(toolchain.build_command(toolchain.find_compiler("cpp"), [src], out, o), check=True)
             self.assertNotEqual(subprocess.run([out]).returncode, 0)
 
 
@@ -105,6 +105,9 @@ EXAMPLE_STANDARDS = {
     "cpp/04_cpp20_features.cpp": "c++20", "cpp/05_cpp23_expected.cpp": "c++23",
     "cpp/06_image_mandelbrot.cpp": "c++17", "cpp/07_image_shapes.cpp": "c++17",
 }
+# file -> minimum GCC major, when the library needs more than the -std flag does.
+# GCC 11 accepts -std=c++23 but its library has no <expected> yet.
+EXAMPLE_MIN_GCC = {"cpp/05_cpp23_expected.cpp": 12}
 
 
 class ExampleTests(unittest.TestCase):
@@ -119,6 +122,8 @@ class ExampleTests(unittest.TestCase):
             for rel, std in EXAMPLE_STANDARDS.items():
                 lang = toolchain.detect_language(rel)
                 if std not in toolchain.supported_standards(lang, major):
+                    continue
+                if major and major < EXAMPLE_MIN_GCC.get(rel, 0):
                     continue
                 o = toolchain.BuildOptions(language=lang, standard=std, werror=True, gcc_major=major)
                 out = Path(tmp) / Path(rel).stem
