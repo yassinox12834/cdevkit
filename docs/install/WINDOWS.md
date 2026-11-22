@@ -29,7 +29,9 @@ $env:MSYSTEM = "UCRT64"
 ```powershell
 $bin = "C:\msys64\ucrt64\bin"
 $path = [Environment]::GetEnvironmentVariable("Path", "User")
-if ($path -notlike "*$bin*") { [Environment]::SetEnvironmentVariable("Path", "$path;$bin", "User") }
+# First, not last: Windows uses the first gcc.exe it finds, so an older MinGW would win.
+$rest = ($path -split ";" | Where-Object { $_ -and $_.TrimEnd("\") -ne $bin }) -join ";"
+[Environment]::SetEnvironmentVariable("Path", "$bin;$rest", "User")
 ```
 
 **Close PowerShell and open a new one**, otherwise `gcc` is still not found.

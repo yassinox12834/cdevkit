@@ -5,8 +5,10 @@ Everything Windows-specific lives here so the rest of the code stays readable.
 
 from __future__ import annotations
 
+import io
 import json
 import os
+import signal
 import shlex
 import shutil
 import subprocess
@@ -52,6 +54,57 @@ def _hidden_window() -> dict:
     return {"creationflags": CREATE_NO_WINDOW} if IS_WINDOWS else {}
 
 
+def _own_group() -> dict:
+    """Start the child in its own process group, so it can be stopped with everything it started."""
+    return {} if IS_WINDOWS else {"start_new_session": True}
+
+
+def kill_tree(proc: subprocess.Popen) -> None:
+    """Stop a process and every process it started. Never raises."""
+    if proc.poll() is not None:
+        return
+    try:
+        if IS_WINDOWS:
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True,
+                           timeout=15, **_hidden_window())
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
+# Cancel button support: every command started by run_stream is registered here,
+# so the UI can stop whatever is running, from any thread.
+_running: set[subprocess.Popen] = set()
+_running_lock = threading.Lock()
+_cancel = threading.Event()
+
+
+def cancel_running() -> None:
+    """Stop every running command and make new ones refuse to start until reset_cancel()."""
+    _cancel.set()
+    with _running_lock:
+        procs = list(_running)
+    for proc in procs:
+        kill_tree(proc)
+
+
+def reset_cancel() -> None:
+    _cancel.clear()
+
+
+def cancelled() -> bool:
+    return _cancel.is_set()
+
+
+EXIT_CANCELLED = 130
+EXIT_TIMEOUT = 124
+
+
 _SPINNER = {"", "-", "\\", "|", "/"}
 
 
@@ -62,8 +115,15 @@ def run_stream(
     env: dict | None = None,
     cwd: str | Path | None = None,
     echo: bool = True,
+    timeout: float | None = None,
 ) -> int:
-    """Run a command and send each output line to `log`. Returns the exit code."""
+    """Run a command and send each output line to `log`. Returns the exit code.
+
+    `timeout` is in seconds; when it runs out the command and its children are
+    stopped and EXIT_TIMEOUT is returned. cancel_running() stops it too
+    (EXIT_CANCELLED)."""
+    if _cancel.is_set():
+        return EXIT_CANCELLED
     if echo:
         log("$ " + format_cmd(cmd))
     try:
@@ -72,13 +132,10 @@ def run_stream(
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
             env=env,
             cwd=cwd,
-            bufsize=1,
             **_hidden_window(),
+            **_own_group(),
         )
     except FileNotFoundError:
         log(f"error: command not found: {cmd[0]}")
@@ -88,7 +145,39 @@ def run_stream(
         return 126
 
     assert proc.stdout is not None
-    for raw in proc.stdout:
+    with _running_lock:
+        _running.add(proc)
+    timed_out = threading.Event()
+    finished = threading.Event()
+
+    def watchdog() -> None:
+        if not finished.wait(timeout):
+            timed_out.set()
+            kill_tree(proc)
+    if timeout:
+        threading.Thread(target=watchdog, daemon=True).start()
+    # newline="\n": split lines on \n only, so the \r of a progress bar stays inside
+    # the line and _pump can keep just its last frame.
+    stream = io.TextIOWrapper(proc.stdout, encoding="utf-8", errors="replace", newline="\n")
+    try:
+        _pump(stream, log)
+        rc = proc.wait()
+    finally:
+        stream.close()
+        finished.set()
+        with _running_lock:
+            _running.discard(proc)
+    if timed_out.is_set():
+        log(f"error: stopped after {timeout:.0f} s without finishing: {Path(str(cmd[0])).name}")
+        return EXIT_TIMEOUT
+    if _cancel.is_set():
+        log("Cancelled.")
+        return EXIT_CANCELLED
+    return rc
+
+
+def _pump(stream: io.TextIOWrapper, log: Log) -> None:
+    for raw in stream:
         # winget redraws progress bars with carriage returns: keep the last frame.
         line = raw.rstrip("\r\n").split("\r")[-1].rstrip()
         if line.strip() in _SPINNER:
@@ -96,10 +185,10 @@ def run_stream(
         if line.startswith("(Reading database ...") and not line.endswith(".)"):
             continue  # apt progress counter
         log(line)
-    return proc.wait()
 
 
-def run_capture(cmd: Sequence[str], *, timeout: float = 20, env: dict | None = None) -> tuple[int, str]:
+def run_capture(cmd: Sequence[str], *, timeout: float = 20, env: dict | None = None,
+                cwd: str | Path | None = None) -> tuple[int, str]:
     """Run a command quietly and return (exit code, combined output)."""
     try:
         res = subprocess.run(
@@ -110,6 +199,7 @@ def run_capture(cmd: Sequence[str], *, timeout: float = 20, env: dict | None = N
             errors="replace",
             timeout=timeout,
             env=env,
+            cwd=cwd,
             stdin=subprocess.DEVNULL,
             **_hidden_window(),
         )
@@ -160,6 +250,47 @@ def refresh_process_path() -> None:
     os.environ["PATH"] = ";".join(merged)
 
 
+def prepend_path_entry(value: str, directory: str, sep: str = ";") -> str:
+    """`value` (a PATH string) with `directory` first, and any other copy of it removed.
+
+    First matters: Windows takes the first gcc.exe it finds, so an old MinGW
+    earlier on PATH would win and cause crash 0xC0000139."""
+    target = _norm(directory)
+    rest = [p for p in value.split(sep) if p.strip() and _norm(p) != target]
+    return sep.join([directory, *rest])
+
+
+def path_shadow(name: str, expected_dir: Path, path_value: str | None = None) -> Path | None:
+    """The folder that provides `name` first on PATH, when it is not `expected_dir`.
+
+    None means the toolchain wins (or `name` is on PATH nowhere)."""
+    exe = name + ".exe" if IS_WINDOWS and not name.lower().endswith(".exe") else name
+    for entry in (path_value if path_value is not None else os.environ.get("PATH", "")).split(os.pathsep):
+        if not entry.strip():
+            continue
+        folder = Path(os.path.expandvars(entry.strip()))
+        if (folder / exe).is_file():
+            return None if _norm(str(folder)) == _norm(str(expected_dir)) else folder
+    return None
+
+
+def path_conflicts() -> list[str]:
+    """Warnings about other compilers that come before the toolchain on PATH (Windows)."""
+    if not IS_WINDOWS or not UCRT_BIN.is_dir():
+        return []
+    refresh_process_path()
+    machine, _ = _read_registry_path(user=False)
+    user, _ = _read_registry_path(user=True)
+    # New terminals see the system PATH first, then the user PATH.
+    full = ";".join(p for p in (machine, user) if p)
+    warnings = []
+    for tool in ("gcc", "g++", "gdb"):
+        other = path_shadow(tool, UCRT_BIN, full)
+        if other:
+            warnings.append(f"{tool} from {other} comes before {UCRT_BIN} on PATH")
+    return warnings
+
+
 def user_path_contains(directory: Path) -> bool:
     if not IS_WINDOWS:
         return str(directory) in os.environ.get("PATH", "").split(os.pathsep)
@@ -172,26 +303,27 @@ def user_path_contains(directory: Path) -> bool:
 
 
 def add_to_user_path(directory: Path, log: Log) -> bool:
-    """Append `directory` to the user PATH. Returns True if something changed."""
+    """Put `directory` first on the user PATH. Returns True if something changed."""
     if not IS_WINDOWS:
         log("PATH editing is only done on Windows.")
-        return False
-    if user_path_contains(directory):
-        log(f"PATH already contains {directory}")
         return False
     import ctypes
     import winreg
 
     value, kind = _read_registry_path(user=True)
-    parts = [p for p in value.split(";") if p.strip()]
-    parts.append(str(directory))
+    new_value = prepend_path_entry(value, str(directory))
+    if new_value == value:
+        log(f"{directory} is already first on your user PATH.")
+        return False
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_SET_VALUE) as key:
-        winreg.SetValueEx(key, "Path", 0, kind or winreg.REG_EXPAND_SZ, ";".join(parts))
+        winreg.SetValueEx(key, "Path", 0, kind or winreg.REG_EXPAND_SZ, new_value)
     # Tell running programs (Explorer, new terminals) that the environment changed.
     result = ctypes.c_ulong()
     ctypes.windll.user32.SendMessageTimeoutW(0xFFFF, 0x001A, 0, "Environment", 0x0002, 5000, ctypes.byref(result))
     refresh_process_path()
-    log(f"Added {directory} to your user PATH. Open a new terminal to see it.")
+    log(f"Put {directory} first on your user PATH. Open a new terminal to see it.")
+    for warning in path_conflicts():
+        log("warning: " + warning + ". Remove the other one from the system PATH, or link statically.")
     return True
 
 
@@ -353,6 +485,9 @@ def path_status() -> tuple[str, str]:
         if not UCRT_BIN.is_dir():
             return "missing", "GCC not installed yet"
         if user_path_contains(UCRT_BIN):
+            conflicts = path_conflicts()
+            if conflicts:
+                return "warn", conflicts[0]
             return "ok", f"{UCRT_BIN} is on PATH"
         return "warn", "GCC is installed but not on PATH"
     if IS_MAC:

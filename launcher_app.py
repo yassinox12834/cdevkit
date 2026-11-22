@@ -1,6 +1,6 @@
 """C/C++ DevKit Launcher: pick a .c or .cpp file, choose the standard, build and run with GCC.
 
-Run with launcher.bat (Windows) or:  python launcher_app.py
+Run with launcher.bat (Windows), launcher.command (macOS), ./launcher.sh (Linux), or:  python launcher_app.py
 Shortcuts: Ctrl+O open, Ctrl+B build, F5 run (rebuilds if needed), Shift+F5 stop.
 """
 
@@ -8,66 +8,67 @@ from __future__ import annotations
 
 import codecs
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
-from tkinter import filedialog
 
-import customtkinter as ctk
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtWidgets import (
+    QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLineEdit, QMainWindow, QMenu, QPlainTextEdit,
+    QScrollArea, QVBoxLayout, QWidget,
+)
 
-from devkit import system, toolchain, ui
+from devkit import system, toolchain
+from devkit import qt as ui
 
-FILE_TYPES = [
-    ("C and C++ sources", "*.c *.cpp *.cc *.cxx *.c++"),
-    ("C sources", "*.c"),
-    ("C++ sources", "*.cpp *.cc *.cxx *.c++"),
-    ("All files", "*.*"),
-]
-
+FILE_FILTER = "C and C++ sources (*.c *.cpp *.cc *.cxx *.c++);;C sources (*.c);;C++ sources (*.cpp *.cc *.cxx *.c++);;All files (*)"
 LANG_LABEL = {"c": "C", "cpp": "C++"}
 LABEL_LANG = {v: k for k, v in LANG_LABEL.items()}
 
 
-class LauncherApp:
+class LauncherWindow(QMainWindow):
     def __init__(self):
-        self.root = ui.init_app("C/C++ DevKit Launcher", "1180x760", (980, 620))
+        super().__init__()
+        self.setWindowTitle("C/C++ DevKit Launcher")
+        self.resize(1180, 780)
+        self.setMinimumSize(960, 600)
         self.settings = system.Settings("launcher")
         self.proc: subprocess.Popen | None = None
         self.file: Path | None = None
         self.gcc_major = 0
-
+        self.gcc_version: str | None = None
+        self._compilers: dict[str, str | None] = {}   # found once, not on every keystroke
         s = self.settings
-        self.v_lang = ctk.StringVar(value=LANG_LABEL[s.get("language", "cpp")])
         self.std_by_lang: dict[str, str] = dict(toolchain.DEFAULT_STANDARD, **s.get("standards", {}))
-        self.v_std = ctk.StringVar(value=self.std_by_lang[s.get("language", "cpp")])
-        self.v_opt = ctk.StringVar(value=s.get("optimisation", "-O0"))
-        self.v_warn = ctk.BooleanVar(value=s.get("warnings", True))
-        self.v_debug = ctk.BooleanVar(value=s.get("debug", True))
-        self.v_werror = ctk.BooleanVar(value=s.get("werror", False))
-        self.v_ub = ctk.BooleanVar(value=s.get("ub_trap", False))
-        self.v_static = ctk.BooleanVar(value=s.get("static", False))
-        self.v_gnu = ctk.BooleanVar(value=s.get("gnu", False))
-        self.v_folder = ctk.BooleanVar(value=s.get("whole_folder", False))
-        self.v_external = ctk.BooleanVar(value=s.get("external", False))
 
-        self.root.grid_columnconfigure(1, weight=1)
-        self.root.grid_rowconfigure(1, weight=1)
-        self._build_header()
-        self._build_panel()
-        self._build_output()
+        root = QWidget()
+        self.setCentralWidget(root)
+        outer = QVBoxLayout(root)
+        outer.setContentsMargins(20, 16, 20, 16)
+        outer.setSpacing(12)
+        outer.addWidget(self._build_header())
+        body = QHBoxLayout()
+        body.setSpacing(14)
+        body.addWidget(self._build_panel())
+        body.addWidget(self._build_output(), 1)
+        outer.addLayout(body, 1)
 
-        self.tasks = ui.TaskRunner(self.root, self.console, self._on_busy)
+        self.tasks = ui.TaskRunner(self.console)
+        self.tasks.busy_changed.connect(self._on_busy)
 
-        for var in (self.v_std, self.v_opt, self.v_warn, self.v_debug, self.v_werror, self.v_ub,
-                    self.v_static, self.v_gnu, self.v_folder):
-            var.trace_add("write", lambda *_: self._update_preview())
-        self.extra.bind("<KeyRelease>", lambda _: self._update_preview())
+        for key, slot in (("Ctrl+O", self.browse), ("Ctrl+B", self.build), ("F5", self.run),
+                          ("Shift+F5", self.stop)):
+            QShortcut(QKeySequence(key), self, slot)
 
-        self.root.bind("<Control-o>", lambda _: self.browse())
-        self.root.bind("<Control-b>", lambda _: self.build())
-        self.root.bind("<F5>", lambda _: self.run())
-        self.root.bind("<Shift-F5>", lambda _: self.stop())
-        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        # Any option change updates the command preview.
+        for box in self.checks.values():
+            box.toggled.connect(self._update_preview)
+        self.lang.changed.connect(self._lang_changed)
+        self.std.currentTextChanged.connect(self._std_changed)
+        self.opt.changed.connect(lambda _: self._update_preview())
+        self.extra.textChanged.connect(self._update_preview)
 
         last = s.get("file")
         if last and Path(last).is_file():
@@ -78,178 +79,192 @@ class LauncherApp:
         self.tasks.run("Looking for GCC...", lambda: toolchain.compiler_info("cpp"), self._show_compiler)
 
     # ------------------------------------------------------------ layout
-    def _build_header(self) -> None:
-        head = ctk.CTkFrame(self.root, fg_color="transparent")
-        head.grid(row=0, column=0, columnspan=2, sticky="ew", padx=20, pady=(18, 10))
-        head.grid_columnconfigure(1, weight=1)
-        ui.label(head, "Launcher", "title").grid(row=0, column=0, sticky="w")
-        self.compiler_pill = ctk.CTkLabel(head, text="GCC: checking...", font=ui.font("small"),
-                                          text_color=ui.MUTED, fg_color=ui.SURFACE_2, corner_radius=6, padx=10)
-        self.compiler_pill.grid(row=0, column=1, sticky="w", padx=14)
+    def _build_header(self) -> QWidget:
+        self.compiler_pill = ui.label("GCC: checking...", "pill")
+        self.b_build = ui.button("Build   Ctrl+B", self.build)
+        self.b_run = ui.button("Run   F5", self.run, primary=True)
+        self.b_stop = ui.button("Stop", self.stop)
+        self.b_stop.setEnabled(False)
+        return ui.row(ui.label("Launcher", "title"), self.compiler_pill, "stretch",
+                      self.b_build, self.b_run, self.b_stop, spacing=10, stretch_end=False)
 
-        bar = ctk.CTkFrame(head, fg_color="transparent")
-        bar.grid(row=0, column=2, sticky="e")
-        self.b_build = ui.button(bar, "Build  Ctrl+B", self.build, width=120)
-        self.b_build.pack(side="left", padx=(0, 8))
-        self.b_run = ui.button(bar, "Run  F5", self.run, primary=True, width=110)
-        self.b_run.pack(side="left", padx=(0, 8))
-        self.b_stop = ui.button(bar, "Stop", self.stop, width=70, state="disabled")
-        self.b_stop.pack(side="left")
+    def _caps(self, lay: QVBoxLayout, text: str) -> None:
+        lay.addSpacing(10)
+        lay.addWidget(ui.label(text.upper(), "caps"))
 
-    def _field(self, parent, text: str) -> None:
-        ui.label(parent, text.upper(), "label", ui.MUTED).pack(anchor="w", padx=16, pady=(14, 6))
+    def _build_panel(self) -> QWidget:
+        s = self.settings
+        frame, lay = ui.card()
+        lay.setSpacing(6)
 
-    def _build_panel(self) -> None:
-        panel = ctk.CTkScrollableFrame(self.root, width=360, fg_color=ui.SURFACE, corner_radius=10, border_width=1,
-                                       border_color=ui.BORDER, scrollbar_button_color=ui.BORDER)
-        panel.grid(row=1, column=0, sticky="nsw", padx=(20, 12), pady=(0, 20))
+        self._caps(lay, "Source file")
+        self.file_label = ui.label("No file selected", "faint", wrap=True)
+        self.file_dir = ui.label("", "faint", wrap=True)
+        lay.addWidget(self.file_label)
+        lay.addWidget(self.file_dir)
+        self.recent_btn = ui.button("Recent")
+        self.recent_menu = QMenu(self)
+        self.recent_btn.setMenu(self.recent_menu)
+        lay.addWidget(ui.row(ui.button("Open file...", self.browse), self.recent_btn,
+                             ui.button("Edit", self.edit_in_vscode)))
+        self._fill_recent()
 
-        # File
-        self._field(panel, "Source file")
-        self.file_label = ui.label(panel, "No file selected", "body", ui.FAINT, wraplength=330)
-        self.file_label.pack(anchor="w", padx=16)
-        self.file_dir = ui.label(panel, "", "small", ui.FAINT, wraplength=330)
-        self.file_dir.pack(anchor="w", padx=16, pady=(0, 8))
-        row = ctk.CTkFrame(panel, fg_color="transparent")
-        row.pack(fill="x", padx=16)
-        ui.button(row, "Open file...", self.browse, width=110).pack(side="left", padx=(0, 8))
-        self.v_recent = ctk.StringVar(value="Recent")
-        self.recent_menu = ui.option_menu(row, self._recent_names() or ["(none)"], self.v_recent,
-                                          self._open_recent, width=110)
-        self.recent_menu.pack(side="left", padx=(0, 8))
-        ui.button(row, "Edit", self.edit_in_vscode, width=60).pack(side="left")
+        self._caps(lay, "Language and standard")
+        lang = s.get("language", "cpp")
+        self.lang = ui.Segmented(["C", "C++"], LANG_LABEL[lang])
+        self.std = QComboBox()
+        self.std.addItems(toolchain.STANDARDS[lang])
+        self.std.setCurrentText(self.std_by_lang[lang])
+        self.std.setMinimumWidth(110)
+        lay.addWidget(ui.row(self.lang, self.std, spacing=10))
 
-        # Language & standard
-        self._field(panel, "Language and standard")
-        row = ctk.CTkFrame(panel, fg_color="transparent")
-        row.pack(fill="x", padx=16)
-        ui.segmented(row, ["C", "C++"], self.v_lang, self._lang_changed).pack(side="left", padx=(0, 10))
-        lang = LABEL_LANG[self.v_lang.get()]
-        self.std_menu = ui.option_menu(row, toolchain.STANDARDS[lang], self.v_std, self._std_changed, width=110)
-        self.std_menu.pack(side="left")
-        ui.switch(panel, "GNU extensions (gnu17 instead of c17)", self.v_gnu).pack(anchor="w", padx=16, pady=(10, 0))
+        self._caps(lay, "Optimisation")
+        self.opt = ui.Segmented(toolchain.OPTIMISATIONS, s.get("optimisation", "-O0"))
+        lay.addWidget(ui.row(self.opt))
+        lay.addWidget(ui.label("-O0 for debugging, -O2 for speed.", "faint"))
 
-        # Optimisation
-        self._field(panel, "Optimisation")
-        ui.segmented(panel, toolchain.OPTIMISATIONS, self.v_opt).pack(anchor="w", padx=16)
-        ui.label(panel, "-O0 for debugging, -O2 for speed.", "small", ui.FAINT).pack(anchor="w", padx=16, pady=(4, 0))
+        self.checks: dict[str, QCheckBox] = {}
 
-        # Checks
-        self._field(panel, "Compiler checks")
-        for text, var in (("Warnings  -Wall -Wextra -Wpedantic", self.v_warn),
-                          ("Treat warnings as errors  -Werror", self.v_werror),
-                          ("Debug information  -g", self.v_debug),
-                          ("Stop on undefined behaviour", self.v_ub)):
-            ui.switch(panel, text, var).pack(anchor="w", padx=16, pady=3)
+        def check(key: str, text: str, default: bool, tip: str = "") -> None:
+            box = QCheckBox(text)
+            box.setChecked(bool(s.get(key, default)))
+            if tip:
+                box.setToolTip(tip)
+            self.checks[key] = box
+            lay.addWidget(box)
 
-        # Build
-        self._field(panel, "Build")
-        ui.switch(panel, "Compile every file in the folder", self.v_folder).pack(anchor="w", padx=16, pady=3)
-        if not system.IS_MAC:  # macOS does not allow fully static executables
-            ui.switch(panel, "Static link (exe runs anywhere)", self.v_static).pack(anchor="w", padx=16, pady=3)
-        else:
-            self.v_static.set(False)
-        ui.label(panel, "Extra flags", "small", ui.MUTED).pack(anchor="w", padx=16, pady=(8, 2))
-        self.extra = ui.entry(panel, "-DDEBUG -Iinclude")
-        self.extra.pack(fill="x", padx=16)
-        if self.settings.get("extra_flags"):
-            self.extra.insert(0, self.settings.get("extra_flags"))
+        self._caps(lay, "Compiler checks")
+        check("warnings", "Warnings  -Wall -Wextra -Wpedantic", True)
+        check("werror", "Treat warnings as errors  -Werror", False)
+        check("debug", "Debug information  -g", True)
+        check("ub_trap", "Stop on undefined behaviour", False,
+              "Overflow, bad shifts and similar bugs stop the program instead of giving wrong results.")
+        check("gnu", "GNU extensions (gnu17 instead of c17)", False)
 
-        # Run
-        self._field(panel, "Run")
-        ui.label(panel, "Arguments", "small", ui.MUTED).pack(anchor="w", padx=16, pady=(0, 2))
-        self.args = ui.entry(panel, "arg1 arg2")
-        self.args.pack(fill="x", padx=16)
-        if self.settings.get("args"):
-            self.args.insert(0, self.settings.get("args"))
-        ui.switch(panel, "Run in a separate terminal", self.v_external).pack(anchor="w", padx=16, pady=(10, 0))
-        ui.label(panel, "Use it for programs that ask for input (scanf, std::cin), or fill the input box.",
-                 "small", ui.FAINT, wraplength=330).pack(anchor="w", padx=16, pady=(2, 0))
-        ui.label(panel, "Input (sent to stdin)", "small", ui.MUTED).pack(anchor="w", padx=16, pady=(8, 2))
-        self.stdin_box = ctk.CTkTextbox(panel, height=70, fg_color=ui.SURFACE_2, border_color=ui.BORDER,
-                                        border_width=1, corner_radius=7, font=ui.font("mono"), text_color=ui.TEXT)
-        self.stdin_box.pack(fill="x", padx=16, pady=(0, 18))
+        self._caps(lay, "Build")
+        check("whole_folder", "Compile every file in the folder", False)
+        if not system.IS_MAC:                     # macOS does not allow fully static executables
+            check("static", "Static link (exe runs anywhere)", False)
+        lay.addWidget(ui.label("Extra flags", "muted"))
+        self.extra = QLineEdit(s.get("extra_flags", ""))
+        self.extra.setPlaceholderText("-DDEBUG -Iinclude")
+        lay.addWidget(self.extra)
 
-    def _build_output(self) -> None:
-        right = ctk.CTkFrame(self.root, fg_color="transparent")
-        right.grid(row=1, column=1, sticky="nsew", padx=(0, 20), pady=(0, 20))
-        right.grid_columnconfigure(0, weight=1)
-        right.grid_rowconfigure(1, weight=1)
+        self._caps(lay, "Run")
+        lay.addWidget(ui.label("Arguments", "muted"))
+        self.args = QLineEdit(s.get("args", ""))
+        self.args.setPlaceholderText("arg1 arg2")
+        lay.addWidget(self.args)
+        check("external", "Run in a separate terminal", False,
+              "Use it for programs that ask for input (scanf, std::cin).")
+        lay.addWidget(ui.label("Input (sent to stdin)", "muted"))
+        self.stdin_box = QPlainTextEdit()
+        self.stdin_box.setFont(ui.mono_font())
+        self.stdin_box.setFixedHeight(70)
+        self.stdin_box.setPlaceholderText("4 8 15 16 23 42")
+        lay.addWidget(self.stdin_box)
+        lay.addStretch(1)
 
-        prev = ui.card(right)
-        prev.grid(row=0, column=0, sticky="ew", pady=(0, 12))
-        prev.grid_columnconfigure(0, weight=1)
-        ui.label(prev, "COMMAND", "label", ui.MUTED).grid(row=0, column=0, sticky="w", padx=14, pady=(10, 2))
-        self.preview = ui.label(prev, "", "mono", ui.MUTED, wraplength=700)
-        self.preview.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 12))
-        prev.bind("<Configure>", lambda e: self.preview.configure(wraplength=max(200, e.width - 30)))
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(frame)
+        scroll.setFixedWidth(370)
+        return scroll
 
-        self.console = ui.Console(right, "Output  (double-click an error to open it)", height=300)
-        self.console.grid(row=1, column=0, sticky="nsew")
+    def _build_output(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(10)
 
-        status = ctk.CTkFrame(right, fg_color="transparent")
-        status.grid(row=2, column=0, sticky="ew", pady=(8, 0))
-        status.grid_columnconfigure(1, weight=1)
-        self.status_dot = ui.Dot(status, "missing")
-        self.status_dot.grid(row=0, column=0, padx=(2, 6))
-        self.status_label = ui.label(status, "Ready", "small", ui.MUTED)
-        self.status_label.grid(row=0, column=1, sticky="w")
+        prev, prev_lay = ui.card()
+        prev_lay.setContentsMargins(14, 10, 14, 12)
+        prev_lay.addWidget(ui.label("COMMAND", "caps"))
+        self.preview = ui.label("", "muted", wrap=True)
+        self.preview.setFont(ui.mono_font(9))
+        self.preview.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        prev_lay.addWidget(self.preview)
+        lay.addWidget(prev)
+
+        out_frame, self.console = ui.console_panel("Output  (double-click an error to open it)")
+        lay.addWidget(out_frame, 1)
+
+        self.status_dot = ui.Dot()
+        self.status_label = ui.label("Ready", "muted")
+        lay.addWidget(ui.row(self.status_dot, self.status_label, spacing=6))
+        return w
 
     # ------------------------------------------------------------ state
     def _show_compiler(self, info) -> None:
+        self._compilers.clear()
         if not isinstance(info, toolchain.CompilerInfo) or not info.path:
-            self.compiler_pill.configure(text="GCC not found: install the Classic pack", text_color=ui.ERR)
+            self._pill("GCC not found: install the Classic pack", ui.ERR)
         elif info.is_clang:
-            self.compiler_pill.configure(text="Only Apple Clang found: install GCC from the Classic pack",
-                                         text_color=ui.WARN)
+            self._pill("Only Apple Clang found: install GCC from the Classic pack", ui.WARN)
         else:
+            self.gcc_version = info.version
             self.gcc_major = toolchain.gcc_major(info.version)
-            self.compiler_pill.configure(text=f"GCC {info.version}", text_color=ui.OK)
-            self._lang_changed(self.v_lang.get())  # hide standards this GCC cannot compile
+            self._pill(f"GCC {info.version}", ui.OK)
+            self._lang_changed(self.lang.value())   # hide standards this GCC cannot compile
         self._update_preview()
 
+    def _pill(self, text: str, color: str) -> None:
+        self.compiler_pill.setText(text)
+        self.compiler_pill.setStyleSheet(f"color: {color};")
+
     def _lang(self) -> str:
-        return LABEL_LANG[self.v_lang.get()]
+        return LABEL_LANG.get(self.lang.value(), "cpp")
 
     def _lang_changed(self, value: str) -> None:
         lang = LABEL_LANG[value]
         allowed = toolchain.supported_standards(lang, self.gcc_major)
-        self.std_menu.configure(values=allowed)
         wanted = self.std_by_lang[lang]
-        self.v_std.set(wanted if wanted in allowed else toolchain.DEFAULT_STANDARD[lang])
+        self.std.blockSignals(True)
+        self.std.clear()
+        self.std.addItems(allowed)
+        self.std.setCurrentText(wanted if wanted in allowed else toolchain.DEFAULT_STANDARD[lang])
+        self.std.blockSignals(False)
         self._update_preview()
 
     def _std_changed(self, value: str) -> None:
-        self.std_by_lang[self._lang()] = value
+        if value:
+            self.std_by_lang[self._lang()] = value
+        self._update_preview()
+
+    def _checked(self, key: str) -> bool:
+        box = self.checks.get(key)
+        return bool(box and box.isChecked())
 
     def options(self) -> toolchain.BuildOptions:
         return toolchain.BuildOptions(
-            language=self._lang(), standard=self.v_std.get(), optimisation=self.v_opt.get(),
-            warnings=self.v_warn.get(), debug=self.v_debug.get(), werror=self.v_werror.get(),
-            ub_trap=self.v_ub.get(), static=self.v_static.get(), gnu=self.v_gnu.get(),
-            extra_flags=self.extra.get(), gcc_major=self.gcc_major,
+            language=self._lang(), standard=self.std.currentText(), optimisation=self.opt.value(),
+            warnings=self._checked("warnings"), debug=self._checked("debug"), werror=self._checked("werror"),
+            ub_trap=self._checked("ub_trap"), static=self._checked("static"), gnu=self._checked("gnu"),
+            extra_flags=self.extra.text(), gcc_major=self.gcc_major,
         )
 
-    def _command(self) -> tuple[list[str], Path, list[Path]] | None:
+    def _command(self):
         if not self.file:
             return None
         lang = self._lang()
-        compiler = toolchain.find_compiler(lang) or toolchain.compiler_name(lang)
-        sources = toolchain.collect_sources(self.file, self.v_folder.get())
+        if lang not in self._compilers:
+            self._compilers[lang] = toolchain.find_compiler(lang)
+        compiler = self._compilers[lang] or toolchain.compiler_name(lang)
+        sources = toolchain.collect_sources(self.file, self._checked("whole_folder"))
         out = toolchain.output_path(self.file)
         return toolchain.build_command(compiler, sources, out, self.options()), out, sources
 
-    def _update_preview(self) -> None:
+    def _update_preview(self, *_):
         built = self._command()
         if not built:
-            self.preview.configure(text="Open a file to see the GCC command.")
+            self.preview.setText("Open a file to see the GCC command.")
             return
         cmd, _, _ = built
         shown = [Path(cmd[0]).name] + [self._short(c) for c in cmd[1:]]
-        self.preview.configure(text=system.format_cmd(shown))
+        self.preview.setText(system.format_cmd(shown))
 
     def _short(self, arg: str) -> str:
-        """Show paths relative to the source folder, so the preview stays readable."""
         if self.file:
             try:
                 return str(Path(arg).relative_to(self.file.parent))
@@ -259,93 +274,93 @@ class LauncherApp:
 
     # ------------------------------------------------------------- files
     def browse(self) -> None:
-        initial = str(self.file.parent) if self.file else None
-        chosen = filedialog.askopenfilename(title="Choose a C or C++ file", filetypes=FILE_TYPES, initialdir=initial)
+        start = str(self.file.parent) if self.file else ""
+        chosen, _ = QFileDialog.getOpenFileName(self, "Choose a C or C++ file", start, FILE_FILTER)
         if chosen:
             self.set_file(Path(chosen))
 
     def set_file(self, path: Path) -> None:
+        # Absolute, because GCC runs inside the file's folder: a relative path such as
+        # "examples/c/a.c" would then point at examples/c/examples/c/a.c.
+        path = Path(path).resolve()
         lang = toolchain.detect_language(path)
         if lang is None:
-            self.console.write(f"warning: {path.name} is not a .c or .cpp file. Choose the language yourself.", "warn")
+            self.console.write(f"warning: {path.name} is not a .c or .cpp file. Choose the language yourself.")
         elif lang != self._lang():
-            self.v_lang.set(LANG_LABEL[lang])
+            self.lang.set_value(LANG_LABEL[lang])
             self._lang_changed(LANG_LABEL[lang])
         self.file = path
-        self.file_label.configure(text=path.name, text_color=ui.TEXT)
-        self.file_dir.configure(text=str(path.parent))
+        self.file_label.setText(path.name)
+        self.file_label.setProperty("role", None)
+        self.file_label.style().unpolish(self.file_label)
+        self.file_label.style().polish(self.file_label)
+        self.file_dir.setText(str(path.parent))
         recent = [str(path)] + [r for r in self.settings.get("recent", []) if r != str(path)]
         self.settings.set("recent", recent[:8])
-        self.recent_menu.configure(values=self._recent_names() or ["(none)"])
-        self.v_recent.set("Recent")
+        self._fill_recent()
         self._update_preview()
         self._save()
 
-    def _recent_names(self) -> list[str]:
-        return [Path(r).name + "  ·  " + Path(r).parent.name for r in self.settings.get("recent", [])]
+    def _fill_recent(self) -> None:
+        self.recent_menu.clear()
+        recent = self.settings.get("recent", [])
+        for r in recent:
+            p = Path(r)
+            action = self.recent_menu.addAction(f"{p.name}   ·   {p.parent}")
+            action.triggered.connect(lambda _=False, path=p: self._open_recent(path))
+        self.recent_btn.setEnabled(bool(recent))
 
-    def _open_recent(self, choice: str) -> None:
-        names = self._recent_names()
-        if choice in names:
-            path = Path(self.settings.get("recent")[names.index(choice)])
-            if path.is_file():
-                self.set_file(path)
-            else:
-                self.console.write(f"error: {path} no longer exists.", "err")
-        self.v_recent.set("Recent")
+    def _open_recent(self, path: Path) -> None:
+        if path.is_file():
+            self.set_file(path)
+        else:
+            self.console.write(f"error: {path} no longer exists.")
 
     def edit_in_vscode(self) -> None:
         if self.file and not system.open_in_vscode(self.file):
-            self.console.write("VS Code not found. Install the Classic pack.", "warn")
+            self.console.write("warning: VS Code not found. Install the Classic pack.")
 
     # ------------------------------------------------------- build & run
-    def _needs_build(self, out: Path, sources: list[Path]) -> bool:
-        if not out.exists():
-            return True
-        built_at = out.stat().st_mtime
-        headers = [p for p in self.file.parent.glob("*.h*") if p.is_file()] if self.file else []
-        return any(p.stat().st_mtime > built_at for p in [*sources, *headers] if p.exists())
+    def _needs_build(self, cmd: list[str], out: Path, sources: list[Path]) -> bool:
+        rebuild, reason = toolchain.needs_build(out, cmd, self.gcc_version, sources)
+        if rebuild and out.exists():
+            self.tasks.log(f"Rebuilding: {reason}.")
+        return rebuild
 
-    def _compile(self, cmd: list[str], out: Path) -> bool:
+    def _record_build(self, cmd: list[str], out: Path, sources: list[Path], opts: toolchain.BuildOptions) -> None:
+        """Remember the command and the included headers, for the next rebuild check."""
+        cwd = self.file.parent
+        rc, text = system.run_capture(toolchain.dependency_command(cmd[0], sources, opts),
+                                      env=system.toolchain_env(), cwd=cwd, timeout=60)
+        deps = []
+        if rc == 0:
+            for dep in toolchain.parse_depfile(text):
+                p = Path(dep)
+                deps.append(str(p if p.is_absolute() else (cwd / p).resolve()))
+        toolchain.write_stamp(out, cmd, self.gcc_version, deps)
+
+    def _compile(self, cmd: list[str], out: Path, sources: list[Path] | None = None,
+                 opts: toolchain.BuildOptions | None = None) -> bool:
         if not Path(cmd[0]).is_absolute() and not system.find_tool(cmd[0]):
             self.tasks.log(f"error: {cmd[0]} not found. Install the Classic pack in the setup app.")
             return False
         out.parent.mkdir(parents=True, exist_ok=True)
-        self.tasks.ui(lambda: self._set_status("busy", "Compiling..."))
+        self.tasks.ui(lambda: (self.b_stop.setEnabled(True), self._set_status("busy", "Compiling...")))
         start = time.perf_counter()
         rc = system.run_stream(cmd, self.tasks.log, env=system.toolchain_env(), cwd=self.file.parent)
         took = time.perf_counter() - start
+        if rc == system.EXIT_CANCELLED:
+            self.tasks.ui(lambda: self._set_status("error", "Build cancelled"))
+            return False
         if rc == 0:
+            if sources is not None and opts is not None:
+                self._record_build(cmd, out, sources, opts)
             self.tasks.log(f"✓ Built {out.name} in {took:.2f} s")
             self.tasks.ui(lambda: self._set_status("ok", f"Built in {took:.2f} s"))
             return True
         self.tasks.log(f"error: build failed (exit {rc}).")
         self.tasks.ui(lambda: self._set_status("error", "Build failed"))
         return False
-
-    def build(self) -> None:
-        built = self._ready()
-        if built:
-            cmd, out, _ = built
-            self.tasks.run("Building...", lambda: self._compile(cmd, out))
-
-    def run(self) -> None:
-        built = self._ready()
-        if not built:
-            return
-        cmd, out, sources = built
-        args = toolchain.split_flags(self.args.get())
-        stdin_text = self.stdin_box.get("1.0", "end-1c")
-        external = self.v_external.get()
-
-        def job():
-            if self._needs_build(out, sources) and not self._compile(cmd, out):
-                return
-            if external:
-                self._run_external(out, args)
-            else:
-                self._run_captured(out, args, stdin_text)
-        self.tasks.run("Running...", job)
 
     def _ready(self):
         if self.tasks.busy:
@@ -355,19 +370,46 @@ class LauncherApp:
             if not self.file:
                 return None
         if not self.file.is_file():
-            self.console.write(f"error: {self.file} no longer exists.", "err")
+            self.console.write(f"error: {self.file} no longer exists.")
             return None
         self._save()
         self.console.clear()
         return self._command()
 
+    def build(self) -> None:
+        built = self._ready()
+        if built:
+            cmd, out, sources = built
+            opts = self.options()
+            self.tasks.run("Building...", lambda: self._compile(cmd, out, sources, opts))
+
+    def run(self) -> None:
+        built = self._ready()
+        if not built:
+            return
+        cmd, out, sources = built
+        args = toolchain.split_flags(self.args.text())
+        stdin_text = self.stdin_box.toPlainText()
+        external = self._checked("external")
+        opts = self.options()
+
+        def job():
+            if self._needs_build(cmd, out, sources) and not self._compile(cmd, out, sources, opts):
+                return
+            if external:
+                self._run_external(out, args)
+            else:
+                self._run_captured(out, args, stdin_text)
+        self.tasks.run("Running...", job)
+
     def _run_external(self, exe: Path, args: list[str]) -> None:
         cwd = self.file.parent
         if system.IS_WINDOWS:
-            line = " ".join(subprocess.list2cmdline([a]) for a in [str(exe), *args])
-            # The outer quotes are removed by cmd /c; call + %^errorlevel% reads the code after the run.
-            command = f'cmd.exe /c "{line} & echo. & call echo [exit code %^errorlevel%] & pause"'
-            subprocess.Popen(command, cwd=cwd, env=system.toolchain_env(), creationflags=system.CREATE_NEW_CONSOLE)
+            # A batch file, not a "cmd /c ..." string: arguments with & or % stay literal.
+            script = exe.parent / (exe.stem + "-run.cmd")
+            script.write_text(toolchain.windows_run_script(exe, args), encoding="utf-8", newline="")
+            subprocess.Popen(["cmd.exe", "/c", str(script)], cwd=cwd, env=system.toolchain_env(),
+                             creationflags=system.CREATE_NEW_CONSOLE)
         else:
             system.open_terminal(system.format_cmd([str(exe), *args]) + '; echo; echo "[exit code $?]"', cwd)
         self.tasks.log(f"Started {exe.name} in a separate terminal.")
@@ -379,12 +421,13 @@ class LauncherApp:
         try:
             proc = subprocess.Popen([str(exe), *args], cwd=self.file.parent, env=system.toolchain_env(),
                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                    **({"creationflags": system.CREATE_NO_WINDOW} if system.IS_WINDOWS else {}))
+                                    **({"creationflags": system.CREATE_NO_WINDOW} if system.IS_WINDOWS
+                                       else {"start_new_session": True}))
         except OSError as exc:
             self.tasks.log(f"error: could not start the program: {exc}")
             return
         self.proc = proc
-        self.tasks.ui(lambda: (self.b_stop.configure(state="normal"), self._set_status("busy", "Running...")))
+        self.tasks.ui(lambda: (self.b_stop.setEnabled(True), self._set_status("busy", "Running...")))
 
         def feed():
             try:
@@ -398,7 +441,7 @@ class LauncherApp:
         start = time.perf_counter()
         decoder = codecs.getincrementaldecoder("utf-8")("replace")
         while True:
-            chunk = proc.stdout.read1(4096) if hasattr(proc.stdout, "read1") else proc.stdout.read(1)
+            chunk = proc.stdout.read1(4096)
             if not chunk:
                 break
             self.tasks.raw(decoder.decode(chunk).replace("\r\n", "\n"))
@@ -406,6 +449,7 @@ class LauncherApp:
         if tail:
             self.tasks.raw(tail)
         rc = proc.wait()
+        proc.stdout.close()
         took = time.perf_counter() - start
         self.proc = None
         self.tasks.raw("\n")
@@ -413,47 +457,55 @@ class LauncherApp:
         desc = toolchain.describe_exit(rc)
         self.tasks.log(f"✓ Finished in {took:.3f} s, {desc}" if rc == 0 else f"error: {desc} (after {took:.3f} s)")
         state = "ok" if rc == 0 else "error"
-        self.tasks.ui(lambda: (self.b_stop.configure(state="disabled"),
-                               self._set_status(state, f"Finished: {desc}")))
+        self.tasks.ui(lambda: (self.b_stop.setEnabled(False), self._set_status(state, f"Finished: {desc}")))
 
     def stop(self) -> None:
+        """Stop the running program, and a build in progress, with any child processes."""
+        stopped = False
         if self.proc and self.proc.poll() is None:
-            self.proc.kill()
-            self.console.write("Stopped by you.", "warn")
+            system.kill_tree(self.proc)
+            stopped = True
+        if self.tasks.busy:
+            self.tasks.cancel()
+            stopped = True
+        if stopped:
+            self.tasks.log("Stopped by you.")
 
     # ------------------------------------------------------------ shared
     def _set_status(self, state: str, text: str) -> None:
         self.status_dot.set(state)
-        self.status_label.configure(text=text)
+        self.status_label.setText(text)
 
-    def _on_busy(self, busy: bool, text: str) -> None:
-        for b in (self.b_build, self.b_run):
-            b.configure(state="disabled" if busy else "normal")
+    def _on_busy(self, busy: bool, _text: str) -> None:
+        self.b_build.setEnabled(not busy)
+        self.b_run.setEnabled(not busy)
         if not busy:
-            self.b_stop.configure(state="disabled")
+            self.b_stop.setEnabled(False)
 
     def _save(self) -> None:
         s = self.settings
         s.set("file", str(self.file) if self.file else None)
         s.set("language", self._lang())
         s.set("standards", self.std_by_lang)
-        for key, var in (("optimisation", self.v_opt), ("warnings", self.v_warn), ("debug", self.v_debug),
-                         ("werror", self.v_werror), ("ub_trap", self.v_ub), ("static", self.v_static),
-                         ("gnu", self.v_gnu), ("whole_folder", self.v_folder), ("external", self.v_external)):
-            s.set(key, var.get())
-        s.set("extra_flags", self.extra.get())
-        s.set("args", self.args.get())
+        s.set("optimisation", self.opt.value())
+        for key, box in self.checks.items():
+            s.set(key, box.isChecked())
+        s.set("extra_flags", self.extra.text())
+        s.set("args", self.args.text())
         s.save()
 
-    def _on_close(self) -> None:
+    def closeEvent(self, event) -> None:
         self.stop()
         self._save()
-        self.root.destroy()
+        super().closeEvent(event)
 
 
-def main() -> ctk.CTk:
-    return LauncherApp().root
+def main() -> int:
+    app = ui.create_app("C/C++ DevKit Launcher")
+    window = LauncherWindow()
+    window.show()
+    return app.exec()
 
 
 if __name__ == "__main__":
-    ui.run_app(main)
+    sys.exit(main())

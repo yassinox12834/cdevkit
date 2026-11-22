@@ -1,1 +1,3 @@
-customtkinter>=5.2,<7
+# Capped below 6.12: PySide6 6.12.0 crashes (memory corruption in Qt callbacks, seen on
+# Python 3.10). Lift the cap once a 6.12.x release passes tests/test_gui.py.
+PySide6-Essentials>=6.8,<6.12

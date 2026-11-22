@@ -21,8 +21,8 @@ sudo apt update && sudo apt install -y build-essential gdb cmake ninja-build mak
 # dnf
 sudo dnf install -y gcc gcc-c++ gdb cmake ninja-build make git
 
-# pacman
-sudo pacman -Sy --needed gcc gdb cmake ninja make git
+# pacman (-Syu, not -Sy: Arch does not support partial upgrades)
+sudo pacman -Syu --needed gcc gdb cmake ninja make git
 ```
 
 ### VS Code (from Microsoft's repository)

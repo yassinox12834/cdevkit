@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import shlex
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -178,6 +180,102 @@ def build_command(compiler: str, sources: list[Path], output: Path, opts: BuildO
     if opts.language == "c" and not system.IS_WINDOWS:
         cmd.append("-lm")
     return cmd
+
+
+# ------------------------------------------------------------------ rebuild check
+# After a build, the launcher writes build/<name>.stamp.json with the exact command
+# line, the compiler version and every header the sources include. The next run
+# rebuilds when any of these changed, not only when a .c/.cpp file is newer.
+
+def stamp_path(output: Path) -> Path:
+    return output.parent / (output.name + ".stamp.json")
+
+
+def dependency_command(compiler: str, sources: list[Path], opts: BuildOptions) -> list[str]:
+    """GCC command that lists the user headers the sources include (-MM skips system headers)."""
+    return [compiler, std_flag(opts), *split_flags(opts.extra_flags), "-MM", *[str(s) for s in sources]]
+
+
+def parse_depfile(text: str) -> list[str]:
+    """Dependencies from GCC's make-style -MM output.
+
+    Handles line continuations, escaped spaces and Windows drive letters
+    ("C:\\x\\a.h" has a colon that is not the rule separator)."""
+    deps: list[str] = []
+    joined = text.replace("\\\r\n", " ").replace("\\\n", " ")
+    for rule in joined.splitlines():
+        # The target ends at the first ": " (or ":" at end of line); "C:" is followed by a slash.
+        sep = rule.find(": ")
+        if sep < 0:
+            if rule.rstrip().endswith(":"):
+                continue
+            sep = rule.find(":")
+            if sep < 0:
+                continue
+        rest = rule[sep + 1:]
+        token, i = "", 0
+        while i < len(rest):
+            ch = rest[i]
+            if ch == "\\" and i + 1 < len(rest) and rest[i + 1] == " ":
+                token += " "
+                i += 2
+                continue
+            if ch in " \t":
+                if token:
+                    deps.append(token)
+                token = ""
+            else:
+                token += ch
+            i += 1
+        if token:
+            deps.append(token)
+    seen: set[str] = set()
+    return [d for d in deps if not (d in seen or seen.add(d))]
+
+
+def write_stamp(output: Path, cmd: list[str], compiler_version: str | None, deps: list[str]) -> None:
+    data = {"command": [str(c) for c in cmd], "compiler": compiler_version or "", "deps": deps}
+    try:
+        stamp_path(output).write_text(json.dumps(data, indent=1), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def needs_build(output: Path, cmd: list[str], compiler_version: str | None, sources: list[Path]) -> tuple[bool, str]:
+    """(rebuild?, reason). Rebuilds when the output is missing, the command or the
+    compiler changed, or any source or included header is newer than the output."""
+    if not output.exists():
+        return True, "no executable yet"
+    try:
+        stamp = json.loads(stamp_path(output).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return True, "no record of the last build"
+    if stamp.get("command") != [str(c) for c in cmd]:
+        return True, "build options changed"
+    if stamp.get("compiler", "") != (compiler_version or ""):
+        return True, "compiler changed"
+    built_at = output.stat().st_mtime
+    for dep in [*map(str, sources), *stamp.get("deps", [])]:
+        p = Path(dep)
+        if not p.exists():
+            return True, f"{p.name} is gone"
+        if p.stat().st_mtime > built_at:
+            return True, f"{p.name} changed"
+    return False, "up to date"
+
+
+def windows_run_script(exe: Path, args: list[str]) -> str:
+    """Batch file that runs the program in its own console, shows the exit code and waits.
+
+    Every argument is quoted, so & | < > ^ are literal; % is doubled because
+    cmd expands it even inside quotes."""
+    def quote(a: str) -> str:
+        q = subprocess.list2cmdline([a])
+        if not q.startswith('"'):
+            q = f'"{q}"'
+        return q.replace("%", "%%")
+    line = " ".join(quote(a) for a in [str(exe), *args])
+    return "\r\n".join(["@echo off", line, "echo.", "echo [exit code %errorlevel%]", "pause", ""])
 
 
 # Windows crash codes, translated so a crash is not just a big number.

@@ -22,7 +22,7 @@ A small Python app that sets up a complete **GCC** development environment for C
 | **macOS** | double-click `setup.command` | `launcher.command` |
 | **Linux** | `./setup.sh` | `./launcher.sh` |
 
-The first start looks for Python 3.10+ with Tkinter. If it finds one, it uses it. If not, it downloads a private copy of Python (about 60 MB, once) into a `.runtime` folder inside the kit, using [uv](https://github.com/astral-sh/uv). Nothing is installed on your system: delete the folder and everything is gone. To always use the private copy, set the environment variable `CDEVKIT_PORTABLE=1`.
+The first start looks for Python 3.10+. If it finds one, it uses it. If not, it downloads a private copy of Python (about 60 MB, once) into a `.runtime` folder inside the kit, using [uv](https://github.com/astral-sh/uv). Then it installs the Qt interface (PySide6, about 100 MB, once). Nothing is installed on your system: delete the folder and everything is gone. To always use the private copy, set the environment variable `CDEVKIT_PORTABLE=1`.
 
 There is deliberately **no .exe**. An unsigned .exe makes Windows SmartScreen show an "unrecognised app" warning, and avoiding that needs a paid code-signing certificate. Windows may still ask for confirmation once, because the zip came from the internet: to skip that, right-click the zip, choose **Properties**, tick **Unblock**, then extract. Cloning with `git clone` avoids it entirely. On macOS, if a `.command` file is blocked, right-click it and choose **Open**.
 
@@ -53,7 +53,7 @@ On macOS, plain `gcc` and `g++` are Apple Clang in disguise. The app always uses
 | **GitHub in VS Code** | Pull Requests, Actions and GitLens extensions |
 | **Extras** | **GitHub CLI**, ccache, Doxygen, Google Benchmark, Doxygen comment generator, Hex Editor |
 
-After installing, the app configures things: the toolchain goes on PATH, and VS Code's user settings get the compiler path (a backup is written to `settings.json.bak` first, and your own values are kept).
+After installing, the app configures things: the toolchain goes on PATH, and VS Code's user settings get the compiler path (a dated backup such as `settings.json.20261122-204500.bak` is written first, the last five are kept, and your own values are kept). Editor habits such as format-on-save are not set globally: new projects get them in their own `.vscode/settings.json`.
 
 ## The setup app
 
@@ -61,7 +61,9 @@ After installing, the app configures things: the toolchain goes on PATH, and VS 
 |---|---|
 | **Packs** | Install a whole pack or single items. Installed items show a green dot and are skipped. |
 | **Configure** | PATH, VS Code settings, Git identity, GitHub sign-in (`gh auth login`), and a **New project** generator: a CMake project with build (`Ctrl+Shift+B`) and debug (`F5`) already set up. |
-| **Verify** | Shows the version of every tool, then compiles and runs a C and a C++ test program. |
+| **Verify** | Shows the version of every tool, then compiles and runs a C and a C++ test program. On Windows it also warns when another MinGW comes before MSYS2's GCC on PATH. |
+
+A **Cancel** button under the pages stops whatever is running, and any command that hangs is stopped after an hour.
 
 ## The launcher
 
@@ -71,8 +73,8 @@ Open a `.c` or `.cpp` file, pick C or C++ and the standard (C89 to C23, C++98 to
 |---|---|
 | `Ctrl+O` | Open a file |
 | `Ctrl+B` | Build only |
-| `F5` | Run (rebuilds first if a source changed) |
-| `Shift+F5` | Stop the running program |
+| `F5` | Run (rebuilds first if a source, an included header, an option or the compiler changed) |
+| `Shift+F5` | Stop the running program or the build |
 
 The executable goes into a `build/` folder next to your source file. For programs that read input (`scanf`, `std::cin`), switch on **Run in a separate terminal** or type the input in the Input box.
 
@@ -83,8 +85,9 @@ The executable goes into a `build/` folder next to your source file. For program
 | `gcc` not found in a terminal | Open a new terminal: PATH changes only reach new windows. |
 | VS Code shows red squiggles on `#include` | Restart VS Code, or click **Configure VS Code for GCC**. |
 | Windows: crash `0xC0000135` | A DLL is missing: add GCC to PATH, or switch on **Static link**. |
-| Windows: crash `0xC0000139` | Another MinGW (from an old Code::Blocks, Strawberry Perl...) is earlier on PATH. Remove it or link statically. |
+| Windows: crash `0xC0000139` | Another MinGW (from an old Code::Blocks, Strawberry Perl...) is earlier on PATH. The app puts MSYS2 first on your user PATH, but the system PATH always comes first: **Verify** names the culprit. Remove it or link statically. |
 | macOS: Homebrew step "did not finish" | Complete the install in the Terminal window that opened, then click **Refresh status**. |
+| Linux: "The Qt interface is installed but cannot start" | A minimal Linux (server, WSL, container) lacks the libraries Qt draws with. The message prints the install command for your distribution. |
 | Linux: no password dialog appears | Your desktop has no `pkexec`; the app opens a terminal with `sudo` instead. |
 | MSYS2 is not in `C:\msys64` | Set the environment variable `CDEVKIT_MSYS_ROOT` to its folder. |
 
@@ -96,6 +99,7 @@ AddressSanitizer is not supported by MinGW GCC on Windows. The launcher's **Stop
 setup_app.py          Setup window (packs, configure, verify)
 launcher_app.py       Launcher window
 setup.bat / .sh / .command, launcher.bat / .sh / .command
+_common.bat / .sh     Shared by the start files: finds or downloads Python, installs PySide6
 devkit/
   packs.py            The packs, with per-system package names. Edit this to add tools.
   installer.py        Detects and installs (winget, MSYS2, Homebrew, apt, dnf, pacman, VS Code)
@@ -104,14 +108,20 @@ devkit/
   vscode_settings.py  Safe merge into VS Code's settings.json
   configure.py        Git and GitHub actions
   system.py           PATH, processes, terminals, finding tools
-  ui.py               Theme and shared widgets
+  qt.py               Qt (PySide6) theme, shared widgets and background task runner
 examples/             Test programs in C and C++, four of them draw .bmp images
 docs/install/         Install guides with plain commands, one per system
 docs/banner.svg       Banner source (banner.png is rendered from it)
-tests/test_core.py    python -m unittest discover tests
+tests/                Unit and off-screen GUI tests: python -m unittest discover tests
+tests/smoke.py        Builds and runs the hello examples with the real toolchain (used by CI)
+.github/workflows/    CI on Windows, macOS and Linux
 ```
 
 Settings for both apps are stored in `~/.cdevkit/`.
+
+## Why Qt and not an .exe
+
+The interface uses Qt through PySide6: native drawing, smooth scrolling, and installs and builds run in background threads so the window never freezes. It stays in Python on purpose. A compiled C++ interface would be an .exe, which brings back the SmartScreen warning, and the setup app's job is to install the compiler, so it cannot need one to start.
 
 ## Licence
 

@@ -1,7 +1,7 @@
 @echo off
 rem Shared by setup.bat and launcher.bat. No .exe is built, so Windows SmartScreen never
 rem shows its "unrecognised app" warning.
-rem  1. If Python 3.10+ with Tkinter is installed, it is used.
+rem  1. If Python 3.10+ is installed, it is used.
 rem  2. Otherwise a private Python is downloaded into the .runtime folder with uv
 rem     (https://github.com/astral-sh/uv). Nothing is installed on the system:
 rem     delete this folder and everything is gone.
@@ -10,21 +10,24 @@ setlocal
 cd /d "%~dp0"
 
 rem ---- Already set up? -------------------------------------------------------
+rem .deps-ok holds a copy of requirements.txt, so an update of the app rebuilds the environment.
 if not exist ".venv\.deps-ok" goto choose
-".venv\Scripts\python.exe" -c "import customtkinter" >nul 2>nul && exit /b 0
-echo The environment no longer works, probably because the folder was moved. Rebuilding it...
+fc /b requirements.txt ".venv\.deps-ok" >nul 2>nul || goto rebuild
+".venv\Scripts\python.exe" -c "import PySide6" >nul 2>nul && exit /b 0
+:rebuild
+echo Setting up the environment again (the app was updated, or the folder was moved)...
 rmdir /s /q ".venv"
 
 :choose
 if exist ".venv" rmdir /s /q ".venv"
 set "PY="
 if "%CDEVKIT_PORTABLE%"=="1" goto portable
-py -3 -c "import sys,tkinter;sys.exit(sys.version_info<(3,10))" >nul 2>nul && set "PY=py -3"
-if not defined PY python -c "import sys,tkinter;sys.exit(sys.version_info<(3,10))" >nul 2>nul && set "PY=python"
+py -3 -c "import sys,venv;sys.exit(sys.version_info<(3,10))" >nul 2>nul && set "PY=py -3"
+if not defined PY python -c "import sys,venv;sys.exit(sys.version_info<(3,10))" >nul 2>nul && set "PY=python"
 if not defined PY goto portable
 
 rem ---- Installed Python ------------------------------------------------------
-echo Using your installed Python. Creating the environment, this takes about 30 seconds...
+echo Using your installed Python. Creating the environment, this takes a minute or two...
 %PY% -m venv .venv || goto venv_failed
 ".venv\Scripts\python.exe" -m pip install --disable-pip-version-check -q -r requirements.txt || goto pip_failed
 goto done
@@ -39,10 +42,15 @@ set "UV_PYTHON_PREFERENCE=only-managed"
 if exist "%UV%" goto have_uv
 echo No suitable Python found. Downloading a private copy into the .runtime folder.
 echo This happens once and takes about 60 MB.
+rem uv is pinned to one release and checked against its published SHA-256,
+rem so a changed or tampered download is refused instead of run.
+set "UV_VERSION=0.13.9"
 set "ARCH=x86_64"
+set "UV_SHA=edd61f7f5728a56cc62455386661860bdfc7bab65872f39b0c25bdcc1d8e1beb"
 if /i "%PROCESSOR_ARCHITECTURE%"=="ARM64" set "ARCH=aarch64"
+if /i "%PROCESSOR_ARCHITECTURE%"=="ARM64" set "UV_SHA=72eed595983a4d7d22d79f21065b0f4479cc7e5c7a89104bb410c8f47559a878"
 if not exist "%RT%" mkdir "%RT%"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; $z=Join-Path $env:TEMP 'cdevkit-uv.zip'; Invoke-WebRequest -UseBasicParsing -Uri ('https://github.com/astral-sh/uv/releases/latest/download/uv-' + $env:ARCH + '-pc-windows-msvc.zip') -OutFile $z; Expand-Archive -Force -Path $z -DestinationPath $env:RT; Remove-Item $z"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; $z=Join-Path $env:TEMP 'cdevkit-uv.zip'; Invoke-WebRequest -UseBasicParsing -Uri ('https://github.com/astral-sh/uv/releases/download/' + $env:UV_VERSION + '/uv-' + $env:ARCH + '-pc-windows-msvc.zip') -OutFile $z; if ((Get-FileHash -Algorithm SHA256 $z).Hash -ne $env:UV_SHA) { Remove-Item $z; Write-Host 'The downloaded uv does not match its expected checksum, so it was not used.'; exit 1 }; Expand-Archive -Force -Path $z -DestinationPath $env:RT; Remove-Item $z"
 if not exist "%UV%" goto download_failed
 
 :have_uv
@@ -53,7 +61,7 @@ goto done
 
 rem ---- Results ---------------------------------------------------------------
 :done
-type nul > ".venv\.deps-ok"
+copy /y requirements.txt ".venv\.deps-ok" >nul
 exit /b 0
 
 :venv_failed
@@ -71,6 +79,6 @@ exit /b 1
 
 :pip_failed
 echo.
-echo Could not install CustomTkinter. Check your internet connection and run this file again.
+echo Could not install the Qt interface. Check your internet connection and run this file again.
 pause
 exit /b 1

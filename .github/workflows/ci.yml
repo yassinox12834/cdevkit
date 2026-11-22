@@ -83,8 +83,7 @@ jobs:
         if: runner.os != 'Windows'
         run: bash -n _common.sh setup.sh launcher.sh setup.command launcher.command
 
-      # Same step on both branches: main uses CustomTkinter, 1.0.0/pyside6 uses Qt.
-      # Importing the two apps checks the GUI toolkit is installed and the code parses.
+      # Importing the two apps checks that Qt (PySide6) is installed and the code parses.
       - name: GUI modules import
         env:
           QT_QPA_PLATFORM: offscreen
@@ -93,5 +92,8 @@ jobs:
       - name: C/C++ smoke test
         run: python tests/smoke.py
 
+      # Includes the GUI tests, drawn off screen: no display is needed.
       - name: Unit tests
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: python -m unittest discover tests -v

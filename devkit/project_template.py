@@ -23,6 +23,13 @@ PointerAlignment: Left
 AllowShortFunctionsOnASingleLine: Empty
 """
 
+# clangd only looks for compile_commands.json in the project folder and build/,
+# but CMake presets write it to build/debug.
+CLANGD = """\
+CompileFlags:
+  CompilationDatabase: build/debug
+"""
+
 GITIGNORE = """\
 build/
 .cache/
@@ -146,7 +153,15 @@ target_compile_options({name} PRIVATE -Wall -Wextra -Wpedantic)
         }],
     }
 
-    vscode_settings = {"cmake.useCMakePresets": "always", "cmake.configureOnOpen": True}
+    vscode_settings = {
+        "cmake.useCMakePresets": "always",
+        "cmake.configureOnOpen": True,
+        # Editor habits for this project only, not for every folder you open.
+        "[c]": {"editor.formatOnSave": True},
+        "[cpp]": {"editor.formatOnSave": True},
+        "files.trimTrailingWhitespace": True,
+        "files.insertFinalNewline": True,
+    }
 
     readme = f"""\
 # {name}
@@ -172,6 +187,7 @@ In VS Code: press `Ctrl+Shift+B` to build, `F5` to debug.
         ".vscode/launch.json": json.dumps(launch, indent=2) + "\n",
         ".vscode/settings.json": json.dumps(vscode_settings, indent=2) + "\n",
         ".clang-format": CLANG_FORMAT,
+        ".clangd": CLANGD,
         ".gitignore": GITIGNORE,
         "README.md": readme,
     }

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import time
 from pathlib import Path
 
 from . import system
@@ -45,11 +46,9 @@ def toolchain_settings(use_clangd: bool) -> dict:
         "C_Cpp.default.cppStandard": "c++20",
         "cmake.generator": "Ninja",
         "cmake.useCMakePresets": "auto",
-        "[c]": {"editor.formatOnSave": True},
-        "[cpp]": {"editor.formatOnSave": True},
-        "files.trimTrailingWhitespace": True,
-        "files.insertFinalNewline": True,
     }
+    # Editor habits (format on save, trailing whitespace) are not set here: they would
+    # change every language in every folder. New projects get them in .vscode/settings.json.
     if use_clangd:
         settings.update({
             "C_Cpp.intelliSenseEngine": "disabled",
@@ -75,6 +74,28 @@ def merge_settings(existing: dict, new: dict, force: set[str]) -> tuple[dict, li
     return merged, changed, kept
 
 
+KEEP_BACKUPS = 5
+
+
+def backup_settings(path: Path, text: str) -> Path:
+    """Save `text` as settings.json.<date-time>.bak next to `path` and keep the newest few.
+    Each backup has its own name, so the original is never overwritten by a later run."""
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    backup = path.with_name(f"{path.name}.{stamp}.bak")
+    n = 1
+    while backup.exists():
+        backup = path.with_name(f"{path.name}.{stamp}-{n}.bak")
+        n += 1
+    backup.write_text(text, encoding="utf-8")
+    old = sorted(path.parent.glob(path.name + ".*.bak"), key=lambda p: p.stat().st_mtime)
+    for extra in old[:-KEEP_BACKUPS]:
+        try:
+            extra.unlink()
+        except OSError:
+            pass
+    return backup
+
+
 def apply_toolchain_settings(log: system.Log, use_clangd: bool = False) -> bool:
     path = user_settings_path()
     new = toolchain_settings(use_clangd)
@@ -97,13 +118,13 @@ def apply_toolchain_settings(log: system.Log, use_clangd: bool = False) -> bool:
         return True
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists():
-            path.with_suffix(".json.bak").write_text(text, encoding="utf-8")
+        backup = backup_settings(path, text) if path.exists() else None
         path.write_text(json.dumps(merged, indent=4) + "\n", encoding="utf-8")
     except OSError as exc:
         log(f"error: cannot write {path}: {exc}")
         return False
-    log(f"✓ VS Code settings updated ({len(changed)} keys). Backup saved as settings.json.bak.")
+    log(f"✓ VS Code settings updated ({len(changed)} keys)."
+        + (f" Backup saved as {backup.name}." if backup else ""))
     if kept:
         log("Kept your own values for: " + ", ".join(kept))
     return True

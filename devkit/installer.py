@@ -41,8 +41,21 @@ VSCODE_SCRIPTS = {
 LINUX_INSTALL = {
     "apt": "export DEBIAN_FRONTEND=noninteractive && apt-get update && apt-get install -y {pkgs}",
     "dnf": "dnf install -y {pkgs}",
-    "pacman": "pacman -Sy --needed --noconfirm {pkgs}",
+    # Arch does not support partial upgrades: "-Sy pkg" can break the system,
+    # so the database refresh always comes with a full upgrade.
+    "pacman": "pacman -Syu --needed --noconfirm {pkgs}",
 }
+
+# Asks the package manager whether a package exists, without root rights.
+LINUX_QUERY = {
+    "apt": ["apt-cache", "show", "--no-all-versions"],
+    "dnf": ["dnf", "info", "-q"],
+    "pacman": ["pacman", "-Si"],
+}
+
+# Seconds before a hung command is stopped. Big packages on a slow line take a while.
+INSTALL_TIMEOUT = 3600
+EXTENSION_TIMEOUT = 600
 
 
 class Installer:
@@ -53,6 +66,7 @@ class Installer:
         self._msys_synced = False
         self._cache: dict[str, set[str]] = {}
         self._waiting_on_user = False
+        self._linux_batch_ran = False      # after one root attempt, never ask for the password again
 
     # ------------------------------------------------------------ helpers
     def source(self, comp: Component):
@@ -145,9 +159,14 @@ class Installer:
             self.log(f"✓ {comp.name} is already installed.")
             return True
 
+        if system.cancelled():
+            return False
+        method, ids = self.source(comp)
+        if method == "linux" and self._linux_batch_ran:
+            self.log(f"error: {comp.name} was not installed by the system package step above.")
+            return False
         self.log(f"Installing {comp.name}...")
         self._waiting_on_user = False
-        method, ids = self.source(comp)
         handler = {
             "winget": self._winget, "msys": self._msys, "brew": self._brew, "cask": self._brew,
             "linux": self._linux, "script": self._script, "special": self._special, "vscode": self._vscode,
@@ -166,10 +185,15 @@ class Installer:
 
     def install_many(self, comps: list[Component]) -> tuple[int, int]:
         comps = [c for c in comps if self.available(c)]
+        self._linux_batch_ran = False
         if self.platform == "linux":
             self._linux_batch(comps)       # one password prompt for all system packages
         done = failed = 0
         for comp in install_order(comps, self.platform, self.manager):
+            if system.cancelled():
+                self.log("Stopped: cancelled.")
+                failed += 1
+                break
             if self.install(comp):
                 done += 1
             else:
@@ -177,6 +201,7 @@ class Installer:
                 if self._waiting_on_user:
                     self.log("Stopped: the remaining items need the step above to finish first.")
                     break
+        self._linux_batch_ran = False
         self.post_configure(comps)
         return done, failed
 
@@ -208,14 +233,14 @@ class Installer:
         rc = system.run_stream(
             [winget, "install", "--id", ids[0], "--exact", "--silent",
              "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"],
-            self.log,
+            self.log, timeout=INSTALL_TIMEOUT,
         )
         return rc == 0 or rc in _WINGET_ALREADY
 
     def _bash(self, script: str) -> int:
         env = os.environ.copy()
         env.update({"MSYSTEM": "UCRT64", "CHERE_INVOKING": "1"})
-        return system.run_stream([system.MSYS_BASH, "-lc", script], self.log, env=env)
+        return system.run_stream([system.MSYS_BASH, "-lc", script], self.log, env=env, timeout=INSTALL_TIMEOUT)
 
     def _msys(self, _method, ids) -> bool:
         if not system.MSYS_BASH.is_file():
@@ -238,7 +263,7 @@ class Installer:
         env = os.environ.copy()
         env["HOMEBREW_NO_ENV_HINTS"] = "1"
         cmd = [brew, "install", "--cask", ids[0]] if method == "cask" else [brew, "install", *ids]
-        return system.run_stream(cmd, self.log, env=env) == 0
+        return system.run_stream(cmd, self.log, env=env, timeout=INSTALL_TIMEOUT) == 0
 
     def _special(self, _method, ids) -> bool:
         if ids[0] == "xcode-clt":
@@ -254,10 +279,10 @@ class Installer:
     def _as_root(self, script: str) -> int:
         """Run a shell script as root: directly if already root, else via a password dialog (pkexec)."""
         if hasattr(os, "geteuid") and os.geteuid() == 0:
-            return system.run_stream(["sh", "-c", script], self.log)
+            return system.run_stream(["sh", "-c", script], self.log, timeout=INSTALL_TIMEOUT)
         if shutil.which("pkexec"):
             self.log("A password dialog will appear: system packages need administrator rights.")
-            return system.run_stream(["pkexec", "sh", "-c", script], self.log)
+            return system.run_stream(["pkexec", "sh", "-c", script], self.log, timeout=INSTALL_TIMEOUT)
         self.log("No password dialog available: finishing in a terminal with sudo.")
         system.open_terminal("sudo sh -c " + shlex.quote(script))
         self._waiting_on_user = True
@@ -270,17 +295,37 @@ class Installer:
             return False
         return self._as_root(template.format(pkgs=" ".join(shlex.quote(i) for i in ids))) == 0
 
-    def _linux_batch(self, comps: list[Component]) -> None:
+    def missing_from_repositories(self, packages: list[str]) -> list[str]:
+        """Packages this distribution does not know. One unknown name makes apt, dnf
+        and pacman refuse the whole transaction, so they are left out up front."""
+        query = LINUX_QUERY.get(self.manager or "")
+        if not query or not shutil.which(query[0]):
+            return []
+        return [p for p in packages if system.run_capture([*query, p], timeout=60)[0] != 0]
+
+    def _linux_batch(self, comps: list[Component]) -> bool:
         """Install the system packages of all missing components with a single root command."""
         packages: list[str] = []
         for comp in comps:
             src = self.source(comp)
             if src and src[0] == "linux" and not self.is_installed(comp):
                 packages += [p for p in src[1] if p not in packages]
-        if packages:
-            self.log(f"Installing {len(packages)} system packages in one go: {' '.join(packages)}")
-            self._linux("linux", tuple(packages))
-            self.invalidate()
+        if not packages:
+            return True
+        self._linux_batch_ran = True
+        unknown = self.missing_from_repositories(packages)
+        if unknown:
+            self.log(f"warning: not in your distribution's repositories, skipped: {' '.join(unknown)}")
+            packages = [p for p in packages if p not in unknown]
+        if not packages:
+            return False
+        self.log(f"Installing {len(packages)} system packages in one go: {' '.join(packages)}")
+        ok = self._linux("linux", tuple(packages))
+        self.invalidate()
+        if not ok:
+            self.log("error: the system package step failed. See the log above; nothing else will ask for "
+                     "your password in this run.")
+        return ok
 
     def _script(self, _method, ids) -> bool:
         if ids[0] == "vscode":
@@ -301,4 +346,5 @@ class Installer:
         if not code_cli:
             self.log("error: VS Code command line ('code') not found. Restart this app after installing VS Code.")
             return False
-        return system.run_stream([code_cli, "--install-extension", ids[0]], self.log) == 0
+        return system.run_stream([code_cli, "--install-extension", ids[0]], self.log,
+                                 timeout=EXTENSION_TIMEOUT) == 0

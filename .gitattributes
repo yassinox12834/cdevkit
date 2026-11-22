@@ -1,4 +1,6 @@
-# Line endings
+# Line endings: every text file is stored with LF; Git converts on checkout.
+* text=auto
+
 *.bat     text eol=crlf
 *.py      text eol=lf
 *.md      text eol=lf

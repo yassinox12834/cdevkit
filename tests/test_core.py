@@ -206,12 +206,12 @@ class InstallerTests(unittest.TestCase):
 
 class SettingsTests(unittest.TestCase):
     def test_merge_keeps_user_values(self):
-        existing = {"[cpp]": {"editor.formatOnSave": False}, "editor.fontSize": 15}
+        existing = {"C_Cpp.default.cppStandard": "c++17", "editor.fontSize": 15}
         new = toolchain_settings(use_clangd=True)
         merged, changed, kept = merge_settings(existing, new, force={"clangd.path"})
         self.assertEqual(merged["editor.fontSize"], 15)
-        self.assertFalse(merged["[cpp]"]["editor.formatOnSave"])
-        self.assertIn("[cpp]", kept)
+        self.assertEqual(merged["C_Cpp.default.cppStandard"], "c++17")
+        self.assertIn("C_Cpp.default.cppStandard", kept)
         self.assertIn("clangd.path", changed)
         _, changed_again, _ = merge_settings(merged, new, force={"clangd.path"})
         self.assertEqual(changed_again, [])

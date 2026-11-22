@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
+import re
 import webbrowser
 
 from . import system
+
+
+# Not a full RFC 5322 check: one @, something before it, a dot in the domain, no spaces.
+_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s.]+$")
+
+
+def valid_email(email: str) -> bool:
+    return bool(_EMAIL.match(email.strip()))
 
 
 def git_get(key: str) -> str:
@@ -20,7 +29,7 @@ def set_git_identity(name: str, email: str, log: system.Log) -> bool:
     if not git:
         log("error: Git is not installed. Install the Classic pack first.")
         return False
-    if not name.strip() or "@" not in email:
+    if not name.strip() or not valid_email(email):
         log("error: enter a name and a valid email address.")
         return False
     ok = system.run_stream([git, "config", "--global", "user.name", name.strip()], log) == 0
