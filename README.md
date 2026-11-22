@@ -1,5 +1,7 @@
 <p align="center"><img src="docs/banner.png" alt="C/C++ DevKit" width="100%"></p>
 
+[![CI](https://github.com/yassinox12834/cdevkit/actions/workflows/ci.yml/badge.svg)](https://github.com/yassinox12834/cdevkit/actions/workflows/ci.yml)
+
 A small Python app that sets up a complete **GCC** development environment for C and C++ on **Windows, macOS and Linux**, plus a launcher that compiles and runs a single file with the standard you choose.
 
 <p align="center">
