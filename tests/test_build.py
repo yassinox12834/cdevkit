@@ -137,10 +137,11 @@ class RealDependencyTests(unittest.TestCase):
 
 class WindowsRunScriptTests(unittest.TestCase):
     def test_special_characters_stay_literal(self):
-        script = toolchain.windows_run_script(Path("C:/My Code/build/a.exe"), ["x&y", "50%", "a b", "|", ""])
+        exe = Path("C:/My Code/build/a.exe")     # str() gives backslashes on Windows, slashes elsewhere
+        script = toolchain.windows_run_script(exe, ["x&y", "50%", "a b", "|", ""])
         lines = script.split("\r\n")
         self.assertEqual(lines[0], "@echo off")
-        self.assertEqual(lines[1], '"C:/My Code/build/a.exe" "x&y" "50%%" "a b" "|" ""')
+        self.assertEqual(lines[1], f'"{exe}" "x&y" "50%%" "a b" "|" ""')
         self.assertIn("echo [exit code %errorlevel%]", lines)
         self.assertIn("pause", lines)
         self.assertTrue(script.endswith("\r\n"))
