@@ -1,7 +1,9 @@
 """C/C++ DevKit Launcher: pick a .c or .cpp file, choose the standard, build and run with GCC.
 
-Run with launcher.bat (Windows), launcher.command (macOS), ./launcher.sh (Linux), or:  python launcher_app.py
-Shortcuts: Ctrl+O open, Ctrl+B build, F5 run (rebuilds if needed), Shift+F5 stop.
+Run with launcher.bat (Windows), launcher.command (macOS), ./launcher.sh (Linux), or:
+    python launcher_app.py [file or folder]
+Shortcuts: Ctrl+O open a file, Ctrl+Shift+O open a folder, Ctrl+B build, F5 run (rebuilds if needed),
+Shift+F5 stop.
 """
 
 from __future__ import annotations
@@ -13,27 +15,246 @@ import threading
 import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtCore import QEvent, QFileSystemWatcher, QSize, Qt, QTimer
+from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLineEdit, QMainWindow, QMenu, QPlainTextEdit,
-    QScrollArea, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLineEdit, QMainWindow, QMenu, QPlainTextEdit,
+    QScrollArea, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from devkit import system, toolchain
+from devkit import project, system, toolchain
 from devkit import qt as ui
 
 FILE_FILTER = "C and C++ sources (*.c *.cpp *.cc *.cxx *.c++);;C sources (*.c);;C++ sources (*.cpp *.cc *.cxx *.c++);;All files (*)"
 LANG_LABEL = {"c": "C", "cpp": "C++"}
 LABEL_LANG = {v: k for k, v in LANG_LABEL.items()}
+PATH_ROLE = Qt.ItemDataRole.UserRole
+KIND_TIPS = {
+    "c": "C source", "cpp": "C++ source", "header": "Header: included by sources, not run on its own",
+    "other": "Not a C or C++ file",
+}
+
+
+class Explorer(QFrame):
+    """The open folder as a tree, like VS Code's explorer.
+
+    C, C++ and header files get their own icon; a green dot marks the files that
+    define main(), the ones F5 can build and run. The tree follows the disk: a
+    watcher rescans when files are added, removed or renamed, and the window
+    rescans when it comes back to the front, which catches edits made in VS Code."""
+
+    def __init__(self, window: "LauncherWindow"):
+        super().__init__()
+        self.window = window
+        self.setObjectName("card")
+        self.setFixedWidth(270)
+        self.folder: Path | None = None
+        self.scanner = project.Scanner()
+        self.scan: project.Scan | None = None
+        self._items: dict[str, QTreeWidgetItem] = {}
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(10, 12, 8, 10)
+        lay.setSpacing(6)
+        self.b_refresh = ui.button("Refresh", self.refresh, flat=True)
+        self.b_refresh.setToolTip("Scan the folder again")
+        self.b_close = ui.button("Close", self.close_folder, flat=True)
+        lay.addWidget(ui.row(ui.label("EXPLORER", "caps"), "stretch", self.b_refresh, self.b_close,
+                             spacing=0, stretch_end=False))
+        self.title = ui.label("No folder open", "heading", wrap=True)
+        lay.addWidget(self.title)
+
+        self.tree = QTreeWidget()
+        self.tree.setObjectName("explorer")
+        self.tree.setHeaderHidden(True)
+        self.tree.setIconSize(QSize(18, 18))
+        self.tree.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
+        self.tree.setIndentation(14)
+        self.tree.setUniformRowHeights(True)
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.currentItemChanged.connect(lambda item, _prev: self._chosen(item))   # click or arrow keys
+        self.tree.itemActivated.connect(self._activated)
+        self.tree.customContextMenuRequested.connect(self._menu)
+        lay.addWidget(self.tree, 1)
+
+        self.empty = QWidget()
+        empty_lay = QVBoxLayout(self.empty)
+        empty_lay.setContentsMargins(0, 8, 0, 0)
+        empty_lay.addWidget(ui.label("Open a folder to see its C and C++ files, with the ones you can "
+                                     "run marked by a green dot.", "faint", wrap=True))
+        empty_lay.addWidget(ui.row(ui.button("Open folder...", window.browse_folder, primary=True)))
+        empty_lay.addStretch(1)
+        lay.addWidget(self.empty, 1)
+
+        self.all_files = QCheckBox("Show other files")
+        self.all_files.setChecked(bool(window.settings.get("explorer_all_files", False)))
+        self.all_files.toggled.connect(self._all_files_toggled)
+        lay.addWidget(self.all_files)
+        legend = ui.row(ui.Dot("ok"), ui.label("defines main(): F5 runs it", "faint"), spacing=4)
+        lay.addWidget(legend)
+        self.summary = ui.label("", "faint", wrap=True)
+        lay.addWidget(self.summary)
+
+        self.watcher = QFileSystemWatcher(self)
+        self.watcher.directoryChanged.connect(lambda _: self._debounce.start())
+        self._debounce = QTimer(self)                # a "git checkout" fires dozens of events: scan once
+        self._debounce.setSingleShot(True)
+        self._debounce.setInterval(300)
+        self._debounce.timeout.connect(self.refresh)
+        self._show_tree(False)
+
+    # ----------------------------------------------------------- folder
+    def _show_tree(self, shown: bool) -> None:
+        self.tree.setVisible(shown)
+        self.empty.setVisible(not shown)
+        for w in (self.b_refresh, self.b_close, self.summary):
+            w.setVisible(shown)
+
+    def open(self, folder: Path) -> None:
+        self.folder = Path(folder).resolve()
+        self.title.setText(self.folder.name or str(self.folder))
+        self.title.setToolTip(str(self.folder))
+        self.tree.blockSignals(True)
+        self.tree.clear()
+        self.tree.blockSignals(False)
+        self._items.clear()
+        self.scan = None
+        self._show_tree(True)
+        self.refresh()
+
+    def close_folder(self) -> None:
+        self.folder = None
+        self.scan = None
+        self.tree.clear()
+        self._items.clear()
+        if self.watcher.directories():
+            self.watcher.removePaths(self.watcher.directories())
+        self.title.setText("No folder open")
+        self.title.setToolTip("")
+        self._show_tree(False)
+        self.window.settings.set("folder", None)
+
+    def refresh(self) -> None:
+        if not self.folder:
+            return
+        if not self.folder.is_dir():
+            self.window.console.write(f"error: {self.folder} no longer exists.")
+            self.close_folder()
+            return
+        scan = self.scanner.scan(self.folder, self.all_files.isChecked())
+        if self.scan is None or self._shape(scan) != self._shape(self.scan):
+            self._rebuild(scan)
+        self.scan = scan
+        self.summary.setText(scan.summary())
+        old = set(self.watcher.directories())
+        new = set(project.watched_dirs(scan))
+        if old - new:
+            self.watcher.removePaths(list(old - new))
+        if new - old:
+            self.watcher.addPaths(list(new - old))
+        if scan.unchecked:                            # huge folder: finish reading for main() shortly
+            QTimer.singleShot(200, self.refresh)
+
+    @staticmethod
+    def _shape(scan: project.Scan) -> list[tuple[str, str, bool]]:
+        def walk(node):
+            for c in node.children:
+                yield (str(c.path), c.kind, c.runnable)
+                if c.kind == "dir":
+                    yield from walk(c)
+        return list(walk(scan.root))
+
+    def _rebuild(self, scan: project.Scan) -> None:
+        """Redraw the tree, keeping which folders were collapsed and where it was scrolled."""
+        collapsed = {p for p, item in self._items.items() if item.childCount() and not item.isExpanded()}
+        scroll = self.tree.verticalScrollBar().value()
+        self.tree.blockSignals(True)                  # clearing must not count as choosing a file
+        self.tree.clear()
+        self._items.clear()
+
+        def add(parent, node: project.Node) -> None:
+            for child in node.children:
+                item = QTreeWidgetItem(parent, [child.name])
+                item.setIcon(0, ui.file_icon(child.kind, child.runnable))
+                item.setData(0, PATH_ROLE, str(child.path))
+                if child.kind == "dir":
+                    item.setToolTip(0, str(child.path))
+                    add(item, child)
+                    item.setExpanded(str(child.path) not in collapsed)
+                else:
+                    tip = KIND_TIPS[child.kind]
+                    if child.runnable:
+                        tip += "  ·  defines main(): F5 builds and runs it"
+                    item.setToolTip(0, f"{tip}\n{child.path}")
+                    if child.kind == "other":
+                        item.setForeground(0, QColor(ui.FAINT))
+                self._items[str(child.path)] = item
+
+        add(self.tree.invisibleRootItem(), scan.root)
+        self.tree.blockSignals(False)
+        self.tree.verticalScrollBar().setValue(scroll)
+        self.select(self.window.file)
+
+    def _all_files_toggled(self, on: bool) -> None:
+        self.window.settings.set("explorer_all_files", on)
+        self.scan = None                              # force a redraw
+        self.refresh()
+
+    def select(self, path: Path | None) -> None:
+        """Highlight the launcher's current file, if it is in this folder."""
+        item = self._items.get(str(path)) if path else None
+        self.tree.blockSignals(True)
+        if item:
+            self.tree.setCurrentItem(item)
+            self.tree.scrollToItem(item)
+        else:
+            self.tree.clearSelection()
+        self.tree.blockSignals(False)
+
+    def contains(self, path: Path | None) -> bool:
+        return bool(path and str(path) in self._items)
+
+    # ------------------------------------------------------ interaction
+    @staticmethod
+    def _path(item: QTreeWidgetItem | None) -> Path | None:
+        return Path(item.data(0, PATH_ROLE)) if item else None
+
+    def _chosen(self, item: QTreeWidgetItem | None) -> None:
+        path = self._path(item)
+        if path and project.file_kind(path) in ("c", "cpp") and path != self.window.file:
+            self.window.set_file(path)
+
+    def _activated(self, item: QTreeWidgetItem, _col: int = 0) -> None:
+        """Double-click or Enter: open files in VS Code, as VS Code's own explorer does."""
+        path = self._path(item)
+        if path and path.is_file():
+            self.window.open_in_vscode(path)
+
+    def _menu(self, pos) -> None:
+        item = self.tree.itemAt(pos)
+        path = self._path(item)
+        if not path:
+            return
+        menu = QMenu(self)
+        kind = "dir" if path.is_dir() else project.file_kind(path)
+        if kind in ("c", "cpp"):
+            run = menu.addAction("Run   F5", lambda: (self.window.set_file(path), self.window.run()))
+            run.setEnabled(not self.window.tasks.busy)
+            build = menu.addAction("Build   Ctrl+B", lambda: (self.window.set_file(path), self.window.build()))
+            build.setEnabled(not self.window.tasks.busy)
+            menu.addSeparator()
+        if kind != "dir":
+            menu.addAction("Open in VS Code", lambda: self.window.open_in_vscode(path))
+        menu.addAction("Show in file manager", lambda: system.open_folder(path if kind == "dir" else path.parent))
+        menu.exec(self.tree.viewport().mapToGlobal(pos))
 
 
 class LauncherWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("C/C++ DevKit Launcher")
-        self.resize(1180, 780)
-        self.setMinimumSize(960, 600)
+        self.resize(1440, 820)
+        self.setMinimumSize(1180, 600)
         self.settings = system.Settings("launcher")
         self.proc: subprocess.Popen | None = None
         self.file: Path | None = None
@@ -51,6 +272,8 @@ class LauncherWindow(QMainWindow):
         outer.addWidget(self._build_header())
         body = QHBoxLayout()
         body.setSpacing(14)
+        self.explorer = Explorer(self)
+        body.addWidget(self.explorer)
         body.addWidget(self._build_panel())
         body.addWidget(self._build_output(), 1)
         outer.addLayout(body, 1)
@@ -58,8 +281,8 @@ class LauncherWindow(QMainWindow):
         self.tasks = ui.TaskRunner(self.console)
         self.tasks.busy_changed.connect(self._on_busy)
 
-        for key, slot in (("Ctrl+O", self.browse), ("Ctrl+B", self.build), ("F5", self.run),
-                          ("Shift+F5", self.stop)):
+        for key, slot in (("Ctrl+O", self.browse), ("Ctrl+Shift+O", self.browse_folder), ("Ctrl+B", self.build),
+                          ("F5", self.run), ("Shift+F5", self.stop)):
             QShortcut(QKeySequence(key), self, slot)
 
         # Any option change updates the command preview.
@@ -70,12 +293,16 @@ class LauncherWindow(QMainWindow):
         self.opt.changed.connect(lambda _: self._update_preview())
         self.extra.textChanged.connect(self._update_preview)
 
+        folder = s.get("folder")
+        if folder and Path(folder).is_dir():
+            self.explorer.open(Path(folder))
         last = s.get("file")
         if last and Path(last).is_file():
             self.set_file(Path(last))
         else:
             self._update_preview()
-        self.console.write("Open a .c or .cpp file (Ctrl+O), then press F5 to build and run.", "muted")
+        self.console.write("Open a folder (Ctrl+Shift+O) or a single .c or .cpp file (Ctrl+O), "
+                           "then press F5 to build and run.", "muted")
         self.tasks.run("Looking for GCC...", lambda: toolchain.compiler_info("cpp"), self._show_compiler)
 
     # ------------------------------------------------------------ layout
@@ -105,8 +332,8 @@ class LauncherWindow(QMainWindow):
         self.recent_btn = ui.button("Recent")
         self.recent_menu = QMenu(self)
         self.recent_btn.setMenu(self.recent_menu)
-        lay.addWidget(ui.row(ui.button("Open file...", self.browse), self.recent_btn,
-                             ui.button("Edit", self.edit_in_vscode)))
+        lay.addWidget(ui.row(ui.button("Open file...", self.browse), ui.button("Open folder...", self.browse_folder)))
+        lay.addWidget(ui.row(self.recent_btn, ui.button("Edit in VS Code", self.edit_in_vscode)))
         self._fill_recent()
 
         self._caps(lay, "Language and standard")
@@ -279,6 +506,24 @@ class LauncherWindow(QMainWindow):
         if chosen:
             self.set_file(Path(chosen))
 
+    def browse_folder(self) -> None:
+        start = str(self.explorer.folder or (self.file.parent if self.file else ""))
+        chosen = QFileDialog.getExistingDirectory(self, "Choose a project folder", start)
+        if chosen:
+            self.open_folder(Path(chosen))
+
+    def open_folder(self, folder: Path) -> None:
+        """Show the folder in the explorer. If the current file is elsewhere, pick the
+        folder's first file with a main(), so F5 works straight away."""
+        self.explorer.open(folder)
+        self.settings.set("folder", str(self.explorer.folder))
+        if not self.explorer.contains(self.file):
+            first = self.explorer.scan.first_runnable() if self.explorer.scan else None
+            if first:
+                self.set_file(first)
+        self.explorer.select(self.file)
+        self._save()
+
     def set_file(self, path: Path) -> None:
         # Absolute, because GCC runs inside the file's folder: a relative path such as
         # "examples/c/a.c" would then point at examples/c/examples/c/a.c.
@@ -298,6 +543,7 @@ class LauncherWindow(QMainWindow):
         recent = [str(path)] + [r for r in self.settings.get("recent", []) if r != str(path)]
         self.settings.set("recent", recent[:8])
         self._fill_recent()
+        self.explorer.select(path)
         self._update_preview()
         self._save()
 
@@ -317,7 +563,11 @@ class LauncherWindow(QMainWindow):
             self.console.write(f"error: {path} no longer exists.")
 
     def edit_in_vscode(self) -> None:
-        if self.file and not system.open_in_vscode(self.file):
+        if self.file:
+            self.open_in_vscode(self.file)
+
+    def open_in_vscode(self, path: Path) -> None:
+        if not system.open_in_vscode(path):
             self.console.write("warning: VS Code not found. Install the Classic pack.")
 
     # ------------------------------------------------------- build & run
@@ -485,6 +735,7 @@ class LauncherWindow(QMainWindow):
     def _save(self) -> None:
         s = self.settings
         s.set("file", str(self.file) if self.file else None)
+        s.set("folder", str(self.explorer.folder) if self.explorer.folder else None)
         s.set("language", self._lang())
         s.set("standards", self.std_by_lang)
         s.set("optimisation", self.opt.value())
@@ -493,6 +744,12 @@ class LauncherWindow(QMainWindow):
         s.set("extra_flags", self.extra.text())
         s.set("args", self.args.text())
         s.save()
+
+    def changeEvent(self, event) -> None:
+        # Back from VS Code: a main() may have been added or removed, rescan (only changed files are read).
+        if event.type() == QEvent.Type.ActivationChange and self.isActiveWindow():
+            self.explorer.refresh()
+        super().changeEvent(event)
 
     def closeEvent(self, event) -> None:
         self.stop()
@@ -503,6 +760,12 @@ class LauncherWindow(QMainWindow):
 def main() -> int:
     app = ui.create_app("C/C++ DevKit Launcher")
     window = LauncherWindow()
+    if len(sys.argv) > 1:                         # launcher_app.py <file or folder>
+        target = Path(sys.argv[1]).expanduser()
+        if target.is_dir():
+            window.open_folder(target)
+        elif target.is_file():
+            window.set_file(target)
     window.show()
     return app.exec()
 

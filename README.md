@@ -74,11 +74,14 @@ A **Cancel** button under the pages stops whatever is running, and any command t
 
 ## The launcher
 
-Open a `.c` or `.cpp` file, pick C or C++ and the standard (C89 to C23, C++98 to C++26), choose warnings and optimisation, then press **F5**. The exact GCC command is shown above the output. Double-click an error to jump to that line in VS Code. Standards your GCC is too old for are hidden. Crashes are explained in words (access violation, stack overflow, missing DLL...).
+Open a project folder or a single `.c` or `.cpp` file, pick C or C++ and the standard (C89 to C23, C++98 to C++26), choose warnings and optimisation, then press **F5**. The exact GCC command is shown above the output. Double-click an error to jump to that line in VS Code. Standards your GCC is too old for are hidden. Crashes are explained in words (access violation, stack overflow, missing DLL...).
+
+**Open folder...** shows the folder in an explorer on the left, like VS Code's: C, C++ and header files each have their own icon, and a **green dot** marks every file that defines `main()`, the ones **F5** can build and run. Click a file to make it the current one, double-click it to open it in VS Code, right-click for Run, Build and Show in file manager. Opening a folder picks its first runnable file, so **F5** works straight away. `build/`, hidden folders and empty folders are left out; tick **Show other files** to see everything else. The tree follows the disk: new, renamed and deleted files show up by themselves, and a `main()` you add in VS Code gets its dot when you come back to the launcher. The folder is remembered, and `launcher_app.py <folder>` opens one directly.
 
 | Shortcut | Action |
 |---|---|
 | `Ctrl+O` | Open a file |
+| `Ctrl+Shift+O` | Open a folder |
 | `Ctrl+B` | Build only |
 | `F5` | Run (rebuilds first if a source, an included header, an option or the compiler changed) |
 | `Shift+F5` | Stop the running program or the build |
@@ -112,7 +115,7 @@ python -m venv .venv
 .venv/bin/python setup_app.py                    # or launcher_app.py
 ```
 
-Run the tests (103 of them, including GUI tests drawn off screen, so no window opens):
+Run the tests (111 of them, including GUI tests drawn off screen, so no window opens):
 
 ```
 QT_QPA_PLATFORM=offscreen python -m unittest discover tests     # PowerShell: $env:QT_QPA_PLATFORM="offscreen"
@@ -134,6 +137,7 @@ devkit/
   packs.py            The packs, with per-system package names. Edit this to add tools.
   installer.py        Detects and installs (winget, MSYS2, Homebrew, apt, dnf, pacman, VS Code)
   toolchain.py        Finds GCC and builds the command line
+  project.py          Scans a folder for the launcher's explorer and finds the files with main()
   project_template.py The "New project" CMake template
   vscode_settings.py  Safe merge into VS Code's settings.json
   configure.py        Git and GitHub actions
@@ -141,6 +145,7 @@ devkit/
   qt.py               Qt (PySide6) theme, shared widgets and background task runner
 examples/             Test programs in C and C++, four of them draw .bmp images
 docs/install/         Install guides with plain commands, one per system
+CHANGELOG.md          What changed in each version
 docs/banner.svg       Banner source (banner.png is rendered from it)
 tests/                Unit and off-screen GUI tests: python -m unittest discover tests
 tests/smoke.py        Builds and runs the hello examples with the real toolchain (used by CI)

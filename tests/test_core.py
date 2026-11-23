@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from devkit import project_template, toolchain  # noqa: E402
+from devkit import project, project_template, toolchain  # noqa: E402
 from devkit.packs import ALL_COMPONENTS, PACKS, install_order  # noqa: E402
 from devkit.vscode_settings import merge_settings, toolchain_settings  # noqa: E402
 
@@ -237,6 +237,83 @@ class TemplateTests(unittest.TestCase):
                 self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
             out = subprocess.run([dest / "build" / "debug" / "demo"], capture_output=True, text=True).stdout
             self.assertIn("Hello from C++", out)
+
+
+class ProjectTests(unittest.TestCase):
+    """The launcher's explorer: which files show, and which ones define main()."""
+
+    def test_has_main(self):
+        yes = ["int main(void) {", "int main(int argc, char **argv)\n{", "int\nmain (void) {",
+               "auto main() -> int {", "void main() {", "int main(void) /* entry */ {"]
+        no = ["// int main(void) {", "/* int main() { */", 'puts("int main() {");', "int main(void);",
+              "x.main() {", "int domain(void) {", "int App::main() {", 'R"(int main(){)"']
+        for text in yes:
+            self.assertTrue(project.has_main(text), text)
+        for text in no:
+            self.assertFalse(project.has_main(text), text)
+
+    def test_file_kind(self):
+        self.assertEqual(project.file_kind("a.c"), "c")
+        self.assertEqual(project.file_kind("a.CPP"), "cpp")
+        self.assertEqual(project.file_kind("a.hpp"), "header")
+        self.assertEqual(project.file_kind("a.h"), "header")
+        self.assertEqual(project.file_kind("CMakeLists.txt"), "other")
+
+    def make_tree(self, root: Path) -> None:
+        (root / "src").mkdir()
+        (root / "include").mkdir()
+        (root / "build").mkdir()
+        (root / ".git").mkdir()
+        (root / "empty").mkdir()
+        (root / "main.c").write_text("int main(void) { return 0; }\n")
+        (root / "src" / "maths.c").write_text("int add(int a, int b) { return a + b; }\n")
+        (root / "src" / "app.cpp").write_text("int main() {}\n")
+        (root / "include" / "maths.h").write_text("int add(int, int);\n")
+        (root / "build" / "old.c").write_text("int main(void) {}\n")
+        (root / ".git" / "x.c").write_text("int main(void) {}\n")
+        (root / "notes.md").write_text("notes\n")
+
+    def test_scan_shows_sources_and_marks_main(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_tree(root)
+            scan = project.Scanner().scan(root)
+            names = {f.name: f for f in scan.root.files()}
+            self.assertEqual(set(names), {"main.c", "maths.c", "app.cpp", "maths.h"})
+            self.assertTrue(names["main.c"].runnable)
+            self.assertTrue(names["app.cpp"].runnable)
+            self.assertFalse(names["maths.c"].runnable)
+            self.assertFalse(names["maths.h"].runnable)
+            # Folders first, alphabetical; build/, hidden and empty folders are left out.
+            self.assertEqual([c.name for c in scan.root.children], ["include", "src", "main.c"])
+            self.assertEqual(scan.counts(), {"c": 2, "cpp": 1, "header": 1, "other": 0, "runnable": 2})
+            self.assertEqual(scan.first_runnable(), (root / "include").resolve().parent / "src" / "app.cpp")
+            self.assertIn("2 can run", scan.summary())
+            with_all = project.Scanner().scan(root, all_files=True)
+            self.assertIn("notes.md", {f.name for f in with_all.root.files()})
+
+    def test_rescan_sees_an_edit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "a.c").write_text("int helper(void) { return 1; }\n")
+            scanner = project.Scanner()
+            self.assertEqual(scanner.scan(root).counts()["runnable"], 0)
+            (root / "a.c").write_text("int main(void) { return 0; }\n")     # different size: cache misses
+            self.assertEqual(scanner.scan(root).counts()["runnable"], 1)
+
+    def test_scan_stops_at_the_file_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for i in range(12):
+                (root / f"f{i:02}.c").write_text("int main(void){}\n")
+            old = project.MAX_FILES
+            project.MAX_FILES = 5
+            try:
+                scan = project.Scanner().scan(root)
+            finally:
+                project.MAX_FILES = old
+            self.assertTrue(scan.truncated)
+            self.assertEqual(len(list(scan.root.files())), 5)
 
 
 if __name__ == "__main__":

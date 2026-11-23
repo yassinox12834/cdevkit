@@ -13,8 +13,10 @@ import threading
 import traceback
 from typing import Callable
 
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QFontDatabase, QTextCharFormat, QTextCursor
+from PySide6.QtCore import QObject, QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import (
+    QColor, QFont, QFontDatabase, QIcon, QPainter, QPainterPath, QPen, QPixmap, QTextCharFormat, QTextCursor,
+)
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QFrame, QHBoxLayout, QLabel, QMessageBox, QPlainTextEdit,
     QPushButton, QVBoxLayout, QWidget,
@@ -104,6 +106,15 @@ QScrollBar::handle:vertical:hover {{ background: #3a4250; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: none; }}
 QScrollBar:horizontal {{ height: 0; }}
+
+QTreeWidget#explorer {{ background: transparent; border: none; outline: none; show-decoration-selected: 0; }}
+QTreeWidget#explorer::item {{ padding: 3px 2px; border-radius: 4px; }}
+QTreeWidget#explorer::item:hover {{ background: #1a1f28; }}
+QTreeWidget#explorer::item:selected {{ background: #1d2a40; color: {TEXT}; }}
+QMenu {{ background: {SURFACE_2}; border: 1px solid {BORDER}; padding: 4px; }}
+QMenu::item {{ padding: 5px 18px; border-radius: 4px; }}
+QMenu::item:selected {{ background: {ACCENT}; color: white; }}
+QMenu::separator {{ height: 1px; background: {BORDER}; margin: 4px 6px; }}
 
 QProgressBar {{ background: {SURFACE_2}; border: none; border-radius: 2px; max-height: 3px; }}
 QProgressBar::chunk {{ background: {ACCENT}; border-radius: 2px; }}
@@ -223,6 +234,71 @@ def tile(letters: str, category: str, size: int = 34) -> QLabel:
     lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
     lbl.setStyleSheet(f"background: {bg}; color: {fg}; border-radius: 8px; font-weight: 700; font-size: 9pt;")
     return lbl
+
+
+# Explorer icons, in the spirit of VS Code's file icons: (badge text, colour).
+FILE_BADGES = {
+    "c": ("C", "#5c9ce6"),
+    "cpp": ("C++", "#a77bf0"),
+    "header": ("H", "#c08ee8"),
+}
+_icons: dict[tuple[str, bool], QIcon] = {}
+
+
+def file_icon(kind: str, runnable: bool = False) -> QIcon:
+    """Icon for an explorer row: a coloured badge for C, C++ and headers, a folder or a
+    plain page otherwise. Files that define main() get a green dot in the corner."""
+    key = (kind, runnable)
+    if key in _icons:
+        return _icons[key]
+    scale = 2                                         # drawn at 2x so it stays sharp on HiDPI screens
+    size = 18
+    pix = QPixmap(size * scale, size * scale)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+    p.scale(scale, scale)
+    if kind == "dir":
+        path = QPainterPath()
+        path.moveTo(1.5, 4.5)
+        path.lineTo(7, 4.5)
+        path.lineTo(8.5, 6)
+        path.lineTo(16.5, 6)
+        path.lineTo(16.5, 15)
+        path.lineTo(1.5, 15)
+        path.closeSubpath()
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor("#c9a25a"))
+        p.drawPath(path)
+    elif kind in FILE_BADGES:
+        text, color = FILE_BADGES[kind]
+        font = QFont()
+        font.setBold(True)
+        font.setPixelSize(13)
+        p.setFont(font)
+        p.setPen(QColor(color))
+        if text == "C++":                             # a big C with a small ++ above, as VS Code draws it
+            p.drawText(QRectF(-2, 1, 13, size), Qt.AlignmentFlag.AlignCenter, "C")
+            font.setPixelSize(8)
+            p.setFont(font)
+            p.drawText(QRectF(9, 0, 9, 10), Qt.AlignmentFlag.AlignCenter, "++")
+        else:
+            p.drawText(QRectF(0, 0, size, size), Qt.AlignmentFlag.AlignCenter, text)
+    else:
+        p.setPen(QPen(QColor(FAINT), 1.2))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(QRectF(4, 2, 10, 14), 1.5, 1.5)
+        for y in (6.5, 9.5, 12.5):
+            p.drawLine(6.5, y, 11.5, y)
+    if runnable:
+        p.setPen(QPen(QColor(BG), 1.5))
+        p.setBrush(QColor(OK))
+        p.drawEllipse(QRectF(10.5, 10.5, 7.5, 7.5))
+    p.end()
+    icon = QIcon(pix)
+    _icons[key] = icon
+    return icon
 
 
 class Segmented(QWidget):

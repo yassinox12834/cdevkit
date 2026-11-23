@@ -8,3 +8,4 @@ dist/
 examples/**/*.bmp
 .runtime/
 pus.ps1
+notes/

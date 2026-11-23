@@ -360,6 +360,45 @@ class LauncherWindowTests(unittest.TestCase):
         self.assertTrue(self.window.file.is_absolute())
         self.assertIn("relative ok", self.run_and_wait())
 
+    def test_open_folder_shows_the_tree_and_picks_a_runnable_file(self):
+        (self.dir / "lib").mkdir()
+        (self.dir / "lib" / "util.c").write_text("int twice(int x) { return 2 * x; }\n")
+        (self.dir / "lib" / "util.h").write_text("int twice(int x);\n")
+        (self.dir / "prog.c").write_text('#include <stdio.h>\nint main(void){puts("from the folder");return 0;}\n')
+        self.window.open_folder(self.dir)
+        explorer = self.window.explorer
+        self.assertTrue(explorer.tree.isVisibleTo(self.window))
+        shown = {Path(p).name for p in explorer._items}
+        self.assertEqual(shown, {"lib", "util.c", "util.h", "prog.c"})
+        self.assertEqual(self.window.file, (self.dir / "prog.c").resolve())     # the one with main()
+        self.assertIn("1 can run", explorer.summary.text())
+        self.assertIn("from the folder", self.run_and_wait())
+
+    def test_choosing_a_file_in_the_tree_selects_it(self):
+        (self.dir / "a.c").write_text("int main(void){return 0;}\n")
+        (self.dir / "b.cpp").write_text("int main(){}\n")
+        (self.dir / "b.hpp").write_text("#pragma once\n")
+        self.window.open_folder(self.dir)
+        tree = self.window.explorer.tree
+        item = self.window.explorer._items[str((self.dir / "b.cpp").resolve())]
+        tree.setCurrentItem(item)
+        self.assertEqual(self.window.file.name, "b.cpp")
+        self.assertEqual(self.window.lang.value(), "C++")
+        header = self.window.explorer._items[str((self.dir / "b.hpp").resolve())]
+        tree.setCurrentItem(header)                     # a header cannot be built on its own
+        self.assertEqual(self.window.file.name, "b.cpp")
+
+    def test_explorer_follows_the_disk(self):
+        self.window.open_folder(self.dir)
+        self.assertEqual(self.window.explorer._items, {})
+        (self.dir / "new.c").write_text("int main(void){return 0;}\n")
+        self.assertTrue(wait_until(lambda: str((self.dir / "new.c").resolve()) in self.window.explorer._items, 10)
+                        or self.window.explorer.refresh() or
+                        str((self.dir / "new.c").resolve()) in self.window.explorer._items)
+        self.window.explorer.close_folder()
+        self.assertFalse(self.window.explorer.tree.isVisibleTo(self.window))
+        self.assertIsNone(self.window.explorer.folder)
+
     def test_preview_follows_the_options(self):
         self.source("p.cpp", "int main(){}\n")
         self.window.checks["werror"].setChecked(True)
