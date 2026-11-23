@@ -1,6 +1,11 @@
 <p align="center"><img src="docs/banner.png" alt="C/C++ DevKit" width="100%"></p>
 
-[![CI](https://github.com/yassinox12834/cdevkit/actions/workflows/ci.yml/badge.svg)](https://github.com/yassinox12834/cdevkit/actions/workflows/ci.yml)
+<p align="center">
+  <a href="https://github.com/yassinox12834/cdevkit/releases/latest"><img alt="latest release" src="https://img.shields.io/github/v/release/yassinox12834/cdevkit?color=0aa5a5"></a>
+  <a href="https://github.com/yassinox12834/cdevkit/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/yassinox12834/cdevkit/actions/workflows/ci.yml/badge.svg"></a>
+  <img alt="Windows, macOS, Linux" src="https://img.shields.io/badge/Windows%20%7C%20macOS%20%7C%20Linux-supported-0b6e8a">
+  <img alt="licence MIT" src="https://img.shields.io/badge/licence-MIT-lightgrey">
+</p>
 
 A small Python app that sets up a complete **GCC** development environment for C and C++ on **Windows, macOS and Linux**, plus a launcher that compiles and runs a single file with the standard you choose.
 
@@ -10,6 +15,19 @@ A small Python app that sets up a complete **GCC** development environment for C
 </p>
 
 ## Start
+
+For the version number, rely on the [latest GitHub release](https://github.com/yassinox12834/cdevkit/releases/latest). It is the reference; the badge above reads from it, and the files in this folder may be ahead of the last release. This README describes version **1.3.0**, and every version is listed in [CHANGELOG.md](CHANGELOG.md).
+
+You'll need:
+
+| | Windows | macOS | Linux |
+|---|---|---|---|
+| System | Windows 10 or 11 | a recent macOS | a desktop distribution using apt, dnf or pacman |
+| Package installer | **winget** (the "App Installer" from the Microsoft Store, already there on most PCs) | Homebrew, which the app installs for you | already included |
+| Rights | one UAC prompt per install | your password, once, for Homebrew | your password, once |
+| Python | none: a private copy is downloaded if needed | none | none |
+
+On every system you also need an internet connection (for the first start and for the installs) and room on the disk for the toolchain you choose. Python 3.10 or newer is only used if it is already installed; otherwise the app brings its own. Only if you run the code from source (see [Working on the code](#working-on-the-code)) do you need Python yourself, plus **PySide6-Essentials 6.8 to below 6.12**, which the start files install for you.
 
 > **Prefer the terminal?** Every step is also written out as commands:
 > [Windows](docs/install/WINDOWS.md) · [macOS](docs/install/MACOS.md) · [Linux](docs/install/LINUX.md)
