@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 try:
-    from PySide6.QtCore import QEventLoop, QTimer
+    from PySide6.QtCore import QEventLoop, Qt, QTimer
     from PySide6.QtWidgets import QApplication, QScrollArea
     HAS_QT = True
 except ImportError:            # the toolkit is optional for the logic tests
@@ -273,6 +273,7 @@ class LauncherWindowTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name)
         self.window = launcher_app.LauncherWindow()
+        self.window.mode_box.setCurrentIndex(0)          # settings are shared between tests: start from "Run here"
         self.window.show()
         self.assertTrue(wait_until(lambda: idle(self.window.tasks), 60))
 
@@ -293,10 +294,14 @@ class LauncherWindowTests(unittest.TestCase):
         self.window.set_file(path)
         return path
 
-    def run_and_wait(self, timeout: float = 120) -> str:
-        self.window.run()
+    def run_and_wait(self, timeout: float = 120, mode: str | None = None) -> str:
+        self.window.run(mode)
         self.assertTrue(wait_until(lambda: idle(self.window.tasks), timeout))
         return self.window.console.toPlainText()
+
+    def open_and_wait(self, folder: Path) -> None:
+        self.window.open_folder(folder)
+        self.assertTrue(wait_until(lambda: not self.window.explorer.scanning, 20))
 
     def test_builds_and_runs_with_stdin(self):
         self.source("sum.c", '#include <stdio.h>\nint main(void){int a,b;scanf("%d %d",&a,&b);'
@@ -365,7 +370,7 @@ class LauncherWindowTests(unittest.TestCase):
         (self.dir / "lib" / "util.c").write_text("int twice(int x) { return 2 * x; }\n")
         (self.dir / "lib" / "util.h").write_text("int twice(int x);\n")
         (self.dir / "prog.c").write_text('#include <stdio.h>\nint main(void){puts("from the folder");return 0;}\n')
-        self.window.open_folder(self.dir)
+        self.open_and_wait(self.dir)
         explorer = self.window.explorer
         self.assertTrue(explorer.tree.isVisibleTo(self.window))
         shown = {Path(p).name for p in explorer._items}
@@ -378,7 +383,7 @@ class LauncherWindowTests(unittest.TestCase):
         (self.dir / "a.c").write_text("int main(void){return 0;}\n")
         (self.dir / "b.cpp").write_text("int main(){}\n")
         (self.dir / "b.hpp").write_text("#pragma once\n")
-        self.window.open_folder(self.dir)
+        self.open_and_wait(self.dir)
         tree = self.window.explorer.tree
         item = self.window.explorer._items[str((self.dir / "b.cpp").resolve())]
         tree.setCurrentItem(item)
@@ -389,7 +394,7 @@ class LauncherWindowTests(unittest.TestCase):
         self.assertEqual(self.window.file.name, "b.cpp")
 
     def test_explorer_follows_the_disk(self):
-        self.window.open_folder(self.dir)
+        self.open_and_wait(self.dir)
         self.assertEqual(self.window.explorer._items, {})
         (self.dir / "new.c").write_text("int main(void){return 0;}\n")
         self.assertTrue(wait_until(lambda: str((self.dir / "new.c").resolve()) in self.window.explorer._items, 10)
@@ -407,6 +412,96 @@ class LauncherWindowTests(unittest.TestCase):
         self.assertIn("-Werror", preview)
         self.assertIn("-DLOCAL", preview)
         self.assertIn("p.cpp", preview)
+
+
+    # ------------------------------------------------------------ 1.4.0
+    def test_scanning_a_big_folder_does_not_freeze_the_window(self):
+        for d in range(40):
+            sub = self.dir / f"d{d:02}"
+            sub.mkdir()
+            for f in range(60):
+                (sub / f"f{f:02}.c").write_text("/* filler */\n" * 400 + "int main(void){return 0;}\n")
+        meter = StallMeter()
+        meter.start()
+        self.open_and_wait(self.dir)
+        meter.stop()
+        self.assertEqual(len([p for p in self.window.explorer._items if p.endswith(".c")]), 2400)
+        self.assertLess(meter.worst, MAX_STALL, f"UI thread stalled for {meter.worst:.2f} s")
+
+    def test_wheel_does_not_change_an_unfocused_combo_box(self):
+        from PySide6.QtCore import QPoint, QPointF
+        from PySide6.QtGui import QWheelEvent
+        combo = self.window.std
+        before = combo.currentIndex()
+        ev = QWheelEvent(QPointF(5, 5), QPointF(5, 5), QPoint(0, 0), QPoint(0, -120),
+                         Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+                         Qt.ScrollPhase.NoScrollPhase, False)
+        QApplication.sendEvent(combo, ev)
+        self.assertEqual(combo.currentIndex(), before)
+
+    def set_mode(self, key: str) -> None:
+        box = self.window.mode_box
+        box.setCurrentIndex(box.findData(key))
+
+    def test_run_button_and_fields_follow_the_mode(self):
+        self.set_mode("check")
+        self.assertIn("Check", self.window.b_run.text())
+        self.assertFalse(self.window.expected_box.isHidden())
+        self.set_mode("bench")
+        self.assertTrue(self.window.expected_box.isHidden())
+        self.assertFalse(self.window.runs_row.isHidden())
+        self.set_mode("here")
+        self.assertTrue(self.window.runs_row.isHidden())
+
+    def test_standalone_executable_goes_to_dist(self):
+        self.source("tool.c", '#include <stdio.h>\nint main(void){puts("standalone");return 0;}\n')
+        self.set_mode("exe")
+        self.assertIn("-O2", self.window.preview.text())
+        self.assertNotIn(" -g ", self.window.preview.text())
+        out = self.run_and_wait()
+        exe = toolchain.standalone_path(self.dir / "tool.c")
+        self.assertTrue(exe.is_file(), out)
+        self.assertIn("Standalone executable", out)
+        self.assertFalse(self.window.b_show.isHidden())
+        if not system.IS_MAC:
+            import subprocess
+            self.assertIn("standalone", subprocess.run([str(exe)], capture_output=True, text=True,
+                                                       env={}).stdout)   # no PATH at all: really standalone
+
+    def test_check_mode_accepts_and_rejects(self):
+        self.source("twice.c", '#include <stdio.h>\nint main(void){int n;scanf("%d",&n);'
+                               'printf("%d\\n",2*n);return 0;}\n')
+        self.set_mode("check")
+        self.window.stdin_box.setPlainText("21")
+        self.window.expected_box.setPlainText("42\n\n")
+        self.assertIn("Accepted", self.run_and_wait())
+        self.window.expected_box.setPlainText("43")
+        out = self.run_and_wait()
+        self.assertIn("wrong answer", out)
+        self.assertIn("line 1 differs", out)
+
+    def test_check_mode_reads_sample_files(self):
+        self.source("echo.c", '#include <stdio.h>\nint main(void){int n;scanf("%d",&n);'
+                              'printf("%d\\n",n+1);return 0;}\n')
+        (self.dir / "echo.in").write_text("6\n")
+        (self.dir / "echo.out").write_text("7\n")
+        self.set_mode("check")
+        out = self.run_and_wait()
+        self.assertIn("Input from echo.in", out)
+        self.assertIn("Accepted", out)
+
+    def test_benchmark_times_every_run(self):
+        self.source("fast.c", "int main(void){return 0;}\n")
+        self.set_mode("bench")
+        self.window.runs_box.setValue(3)
+        out = self.run_and_wait()
+        self.assertIn("run   3", out)
+        self.assertIn("3 runs: fastest", out)
+
+    def test_mode_is_remembered(self):
+        self.set_mode("bench")
+        self.window._save()
+        self.assertEqual(self.window.settings.get("run_mode"), "bench")
 
 
 if __name__ == "__main__":

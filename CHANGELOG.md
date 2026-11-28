@@ -2,6 +2,38 @@
 
 All notable changes to C/C++ DevKit. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.4.0] - 2026-11-28
+
+Name: **1.4.0 "Run modes"**. New features that change nothing you relied on, so a minor version.
+
+### Added
+- **Run modes.** *What F5 does*, in the launcher's *Run* section, offers seven ways to run a file:
+  - **Run here** (as before) and **Run in a terminal** (replaces the *Run in a separate terminal* checkbox; your old choice is kept).
+  - **Make a standalone executable**: `-O2`, stripped and statically linked into `dist/`, not run. **Show executable** opens its folder.
+  - **Make a standalone executable and run it**: the same, then started in a terminal without GCC on PATH.
+  - **Check against expected output**: compares the output with an *Expected output* box or `<name>.out` / `<name>.ans`, with input from the *Input* box or `<name>.in`. Says *Accepted* or names the first different line.
+  - **Benchmark**: runs 2 to 1000 times with the output hidden, shows fastest, median, mean and slowest.
+  - **Debug in a terminal**: a `-O0 -g` build opened in GDB (LLDB on macOS).
+- The run button is named after the mode (*Run*, *Make exe*, *Check*, *Benchmark*...); the mode is remembered.
+- **Run as** submenu in the explorer's right-click menu.
+- A moving bar next to the status while something runs.
+
+### Changed
+- The explorer scans folders on a background thread. Opening a big folder, a file appearing, or coming back to the window no longer freezes the interface (a 2 400-file folder blocked it for about half a second before, on every return to the window).
+- Rescans when the window comes back to the front happen at most once a second, so closing a menu or a dialog no longer triggers one.
+- Settings are written to disk once, 0.4 s after the last change, instead of on every click: moving through the tree with the arrow keys stays smooth.
+- The tree redraws in one go (no flicker) and scrolls by pixels instead of whole rows; the options panel and the setup pages scroll further per wheel step.
+- `dist/` is left out of the explorer, like `build/`.
+
+### Fixed
+- Scrolling the options panel with the mouse wheel changed the C/C++ standard when the pointer passed over the list. Lists and number boxes now ignore the wheel until clicked (launcher and setup app).
+- Choosing another file while a build ran made the build finish in the new file's folder (wrong header list, wrong working directory). A build now keeps the file it started with.
+- The status said *Ready* while the GCC check was still running, and stayed on *Compiling...* when a program could not start.
+- A missing terminal emulator on Linux is reported in the Output panel instead of failing silently.
+
+### Tests
+- 111 to 125: output comparison, standalone and debug options, sample files, timings, a 2 400-file scan that must not stall the window, the mouse-wheel fix, and off-screen runs of the standalone, check and benchmark modes (the standalone executable is run with an empty environment to prove it needs nothing).
+
 ## [1.3.0] - 2026-11-23
 
 ### Added
@@ -59,6 +91,7 @@ All notable changes to C/C++ DevKit. Versions follow [Semantic Versioning](https
 
 - First release: setup app (packs, configure, verify) and launcher.
 
+[1.4.0]: https://github.com/yassinox12834/cdevkit/compare/1.3.0...1.4.0
 [1.3.0]: https://github.com/yassinox12834/cdevkit/compare/1.2.0...1.3.0
 [1.2.0]: https://github.com/yassinox12834/cdevkit/compare/1.1.0...1.2.0
 [1.1.0]: https://github.com/yassinox12834/cdevkit/compare/1.0.0...1.1.0

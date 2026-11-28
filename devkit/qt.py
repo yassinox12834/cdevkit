@@ -18,8 +18,8 @@ from PySide6.QtGui import (
     QColor, QFont, QFontDatabase, QIcon, QPainter, QPainterPath, QPen, QPixmap, QTextCharFormat, QTextCursor,
 )
 from PySide6.QtWidgets import (
-    QApplication, QButtonGroup, QFrame, QHBoxLayout, QLabel, QMessageBox, QPlainTextEdit,
-    QPushButton, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QButtonGroup, QComboBox, QFrame, QHBoxLayout, QLabel, QMessageBox,
+    QPlainTextEdit, QPushButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from . import system
@@ -92,6 +92,8 @@ QComboBox::drop-down {{ border: none; width: 22px; }}
 QComboBox QAbstractItemView {{ background: #161a21; border: 1px solid {BORDER}; outline: none;
                                selection-background-color: {ACCENT}; }}
 
+QSpinBox {{ background: #161a21; border: 1px solid {BORDER}; border-radius: 6px; padding: 4px 6px; }}
+QSpinBox:focus {{ border-color: {ACCENT}; }}
 QCheckBox {{ spacing: 9px; background: transparent; }}
 QCheckBox::indicator {{ width: 15px; height: 15px; border-radius: 4px; border: 1px solid #3a424e;
                         background: #161a21; }}
@@ -299,6 +301,43 @@ def file_icon(kind: str, runnable: bool = False) -> QIcon:
     icon = QIcon(pix)
     _icons[key] = icon
     return icon
+
+
+class ComboBox(QComboBox):
+    """A combo box that only reacts to the mouse wheel once it has been clicked.
+
+    Plain Qt combo boxes change value when the wheel passes over them, so scrolling
+    the options panel silently switched the C++ standard. Now the wheel scrolls the panel."""
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def wheelEvent(self, event) -> None:
+        if self.hasFocus():
+            super().wheelEvent(event)
+        else:
+            event.ignore()                            # passes the wheel on to the scroll area
+
+
+class SpinBox(QSpinBox):
+    """Same wheel rule as ComboBox."""
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def wheelEvent(self, event) -> None:
+        if self.hasFocus():
+            super().wheelEvent(event)
+        else:
+            event.ignore()
+
+
+def smooth_scroll(view: QAbstractItemView) -> None:
+    """Scroll lists and trees by pixels rather than by whole rows."""
+    view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+    view.verticalScrollBar().setSingleStep(12)
 
 
 class Segmented(QWidget):

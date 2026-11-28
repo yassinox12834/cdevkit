@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import shlex
+import statistics
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from . import system
@@ -42,6 +43,8 @@ class BuildOptions:
     gnu: bool = False              # gnu17 instead of c17 (GCC extensions)
     extra_flags: str = ""
     gcc_major: int = 0             # 0 = assume a recent GCC
+    strip: bool = False            # -s: drop symbols, a smaller executable
+    static_runtime: bool = False   # -static-libgcc (-static-libstdc++): where -static is not allowed
 
 
 # Before a standard is final, GCC only accepts its draft name.
@@ -173,6 +176,12 @@ def build_command(compiler: str, sources: list[Path], output: Path, opts: BuildO
         cmd += ["-fsanitize=undefined", "-fsanitize-undefined-trap-on-error"]
     if opts.static:
         cmd.append("-static")
+    elif opts.static_runtime:
+        cmd.append("-static-libgcc")
+        if opts.language == "cpp":
+            cmd.append("-static-libstdc++")
+    if opts.strip and not system.IS_MAC:       # Apple's linker rejects -s
+        cmd.append("-s")
     cmd.append("-fdiagnostics-color=never")
     cmd += split_flags(opts.extra_flags)
     cmd += [str(s) for s in sources]
@@ -264,8 +273,8 @@ def needs_build(output: Path, cmd: list[str], compiler_version: str | None, sour
     return False, "up to date"
 
 
-def windows_run_script(exe: Path, args: list[str]) -> str:
-    """Batch file that runs the program in its own console, shows the exit code and waits.
+def windows_script(cmd: list[str]) -> str:
+    """Batch file that runs a command in its own console, shows the exit code and waits.
 
     Every argument is quoted, so & | < > ^ are literal; % is doubled because
     cmd expands it even inside quotes."""
@@ -274,8 +283,112 @@ def windows_run_script(exe: Path, args: list[str]) -> str:
         if not q.startswith('"'):
             q = f'"{q}"'
         return q.replace("%", "%%")
-    line = " ".join(quote(a) for a in [str(exe), *args])
+    line = " ".join(quote(str(a)) for a in cmd)
     return "\r\n".join(["@echo off", line, "echo.", "echo [exit code %errorlevel%]", "pause", ""])
+
+
+def windows_run_script(exe: Path, args: list[str]) -> str:
+    return windows_script([str(exe), *args])
+
+
+# ------------------------------------------------------------------ run modes
+# What F5 does. Each mode is (key, menu text, short button text, explanation).
+RUN_MODES = [
+    ("here", "Run here", "Run",
+     "Builds if needed and runs in the Output panel. The Input box is sent to stdin."),
+    ("terminal", "Run in a terminal", "Run",
+     "Runs in its own terminal window. Use it for programs that ask for input as they go (scanf, std::cin)."),
+    ("exe", "Make a standalone executable", "Make exe",
+     "Builds an optimised, stripped executable into dist/, without running it. "
+     "Statically linked, so it runs on another computer without GCC."),
+    ("exe_run", "Make a standalone executable and run it", "Make exe and run",
+     "Builds the standalone executable into dist/, then starts it in a terminal on its own, "
+     "outside the DevKit, the way someone double-clicking it would."),
+    ("check", "Check against expected output", "Check",
+     "Runs with the Input box (or <name>.in) and compares what it prints with the Expected output box "
+     "(or <name>.out / <name>.ans), like an online judge."),
+    ("bench", "Benchmark (time several runs)", "Benchmark",
+     "Runs the program several times with its output hidden, then shows the fastest, median and slowest run."),
+    ("debug", "Debug in a terminal (GDB / LLDB)", "Debug",
+     "Builds a -O0 -g copy into build/ and opens it in the debugger in a terminal. "
+     "Type run, break main, next, print x."),
+]
+MODE_KEYS = [m[0] for m in RUN_MODES]
+MODE_TEXT = {m[0]: m[1] for m in RUN_MODES}
+MODE_BUTTON = {m[0]: m[2] for m in RUN_MODES}
+MODE_HELP = {m[0]: m[3] for m in RUN_MODES}
+
+
+def standalone_options(opts: BuildOptions) -> BuildOptions:
+    """Options for an executable meant to leave the DevKit: optimised, no debug data,
+    stripped, and linked so it does not need GCC's DLLs or shared libraries.
+    macOS forbids fully static programs, so only the GCC runtime is linked in there."""
+    return replace(opts, optimisation="-O2", debug=False, ub_trap=False, werror=False,
+                   static=not system.IS_MAC, static_runtime=system.IS_MAC, strip=True)
+
+
+def standalone_path(main: Path) -> Path:
+    suffix = ".exe" if system.IS_WINDOWS else ""
+    return main.parent / "dist" / (main.stem + suffix)
+
+
+def debug_options(opts: BuildOptions) -> BuildOptions:
+    """Options a debugger works best with: no optimisation, full debug data, dynamic linking."""
+    return replace(opts, optimisation="-O0", debug=True, static=False, static_runtime=False, strip=False)
+
+
+def debug_path(main: Path) -> Path:
+    suffix = ".exe" if system.IS_WINDOWS else ""
+    return main.parent / "build" / (main.stem + "-debug" + suffix)
+
+
+def find_debugger() -> str | None:
+    """GDB, or LLDB on macOS where GDB does not run on Apple Silicon."""
+    names = ("lldb", "gdb") if system.IS_MAC else ("gdb",)
+    return next((p for p in map(system.find_tool, names) if p), None)
+
+
+def debugger_command(debugger: str, exe: Path, args: list[str]) -> list[str]:
+    if Path(debugger).name.lower().startswith("lldb"):
+        return [debugger, "--", str(exe), *args]
+    return [debugger, "-q", "--args", str(exe), *args]
+
+
+def sample_files(main: Path) -> tuple[Path | None, Path | None]:
+    """<name>.in and <name>.out (or .ans) next to the source, the usual judge layout."""
+    folder, stem = main.parent, main.stem
+    inp = folder / f"{stem}.in"
+    out = next((p for p in (folder / f"{stem}.out", folder / f"{stem}.ans") if p.is_file()), None)
+    return (inp if inp.is_file() else None), out
+
+
+def _judge_lines(text: str) -> list[str]:
+    lines = [ln.rstrip() for ln in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    while lines and not lines[-1]:
+        lines.pop()
+    return lines
+
+
+def compare_output(actual: str, expected: str) -> tuple[bool, str]:
+    """(matches?, explanation). Like most judges, ignores spaces at line ends,
+    blank lines at the end and Windows line endings, but nothing else."""
+    got, want = _judge_lines(actual), _judge_lines(expected)
+    if got == want:
+        return True, f"output matches ({len(want)} line{'s' if len(want) != 1 else ''})"
+    for i, (g, w) in enumerate(zip(got, want), start=1):
+        if g != w:
+            return False, f"line {i} differs: expected {w!r}, got {g!r}"
+    if len(got) < len(want):
+        return False, f"output stops after {len(got)} lines, {len(want)} expected (next: {want[len(got)]!r})"
+    return False, f"{len(got) - len(want)} extra line(s) after the expected {len(want)} (first: {got[len(want)]!r})"
+
+
+def timing_summary(times: list[float]) -> str:
+    """'fastest 1.20 ms · median 1.31 ms · mean 1.35 ms · slowest 1.90 ms'"""
+    def fmt(t: float) -> str:
+        return f"{t * 1000:.2f} ms" if t < 1 else f"{t:.3f} s"
+    return (f"fastest {fmt(min(times))}  ·  median {fmt(statistics.median(times))}  ·  "
+            f"mean {fmt(statistics.fmean(times))}  ·  slowest {fmt(max(times))}")
 
 
 # Windows crash codes, translated so a crash is not just a big number.

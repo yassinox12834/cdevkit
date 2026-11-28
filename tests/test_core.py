@@ -20,6 +20,59 @@ HAS_GCC = shutil.which("gcc") is not None and shutil.which("g++") is not None
 
 
 class ToolchainTests(unittest.TestCase):
+    def test_compare_output_like_a_judge(self):
+        self.assertTrue(toolchain.compare_output("1 2 \r\n3\n\n", "1 2\n3")[0])
+        same, why = toolchain.compare_output("1\n5\n", "1\n4\n")
+        self.assertFalse(same)
+        self.assertIn("line 2", why)
+        self.assertIn("stops after 1", toolchain.compare_output("1\n", "1\n2\n")[1])
+        self.assertIn("extra", toolchain.compare_output("1\n2\n", "1\n")[1])
+        self.assertFalse(toolchain.compare_output("1 2", "1  2")[0])     # inner spaces still count
+
+    def test_standalone_and_debug_options(self):
+        base = toolchain.BuildOptions(language="cpp", optimisation="-O0", debug=True, ub_trap=True)
+        cmd = toolchain.build_command("g++", [Path("a.cpp")], Path("dist/a"), toolchain.standalone_options(base))
+        self.assertIn("-O2", cmd)
+        self.assertNotIn("-g", cmd)
+        self.assertNotIn("-fsanitize=undefined", cmd)
+        if toolchain.system.IS_MAC:
+            self.assertIn("-static-libstdc++", cmd)
+        else:
+            self.assertIn("-static", cmd)
+            self.assertIn("-s", cmd)
+        dbg = toolchain.build_command("g++", [Path("a.cpp")], Path("build/a-debug"),
+                                      toolchain.debug_options(toolchain.BuildOptions(optimisation="-O3", static=True)))
+        self.assertIn("-O0", dbg)
+        self.assertIn("-g", dbg)
+        self.assertNotIn("-static", dbg)
+        self.assertEqual(toolchain.standalone_path(Path("/x/a.c")).parent.name, "dist")
+        self.assertIn("-debug", toolchain.debug_path(Path("/x/a.c")).name)
+
+    def test_debugger_command(self):
+        self.assertEqual(toolchain.debugger_command("gdb", Path("p"), ["1"]), ["gdb", "-q", "--args", "p", "1"])
+        self.assertEqual(toolchain.debugger_command("/usr/bin/lldb", Path("p"), []), ["/usr/bin/lldb", "--", "p"])
+
+    def test_every_run_mode_is_described(self):
+        self.assertEqual(len(set(toolchain.MODE_KEYS)), len(toolchain.RUN_MODES))
+        for key in toolchain.MODE_KEYS:
+            self.assertTrue(toolchain.MODE_TEXT[key] and toolchain.MODE_BUTTON[key] and toolchain.MODE_HELP[key])
+
+    def test_timing_summary(self):
+        text = toolchain.timing_summary([0.002, 0.001, 0.003])
+        self.assertIn("fastest 1.00 ms", text)
+        self.assertIn("median 2.00 ms", text)
+        self.assertIn("slowest 3.00 ms", text)
+
+    def test_sample_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "p.cpp"
+            src.write_text("int main(){}")
+            self.assertEqual(toolchain.sample_files(src), (None, None))
+            (Path(tmp) / "p.in").write_text("1")
+            (Path(tmp) / "p.ans").write_text("2")
+            inp, out = toolchain.sample_files(src)
+            self.assertEqual((inp.name, out.name), ("p.in", "p.ans"))
+
     def test_detect_language(self):
         self.assertEqual(toolchain.detect_language("a.c"), "c")
         self.assertEqual(toolchain.detect_language("a.CPP"), "cpp")

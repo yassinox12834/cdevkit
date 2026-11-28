@@ -17,7 +17,7 @@ from .toolchain import C_EXTENSIONS, CPP_EXTENSIONS
 HEADER_EXTENSIONS = {".h", ".hpp", ".hh", ".hxx", ".h++", ".inl", ".ipp", ".tpp"}
 
 # Folders nobody wants to browse: build output, tool caches, virtual environments.
-SKIPPED_DIRS = {"build", "node_modules", "__pycache__", "venv", "out", "bin", "obj"}
+SKIPPED_DIRS = {"build", "dist", "node_modules", "__pycache__", "venv", "out", "bin", "obj"}
 SKIPPED_PREFIXES = (".", "cmake-build-")
 
 MAX_FILES = 3000          # a scan stops listing after this many files

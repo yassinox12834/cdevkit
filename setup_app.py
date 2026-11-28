@@ -12,7 +12,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QComboBox, QFileDialog, QGridLayout, QHBoxLayout, QLineEdit, QMainWindow,
+    QButtonGroup, QCheckBox, QFileDialog, QGridLayout, QHBoxLayout, QLineEdit, QMainWindow,
     QProgressBar, QPushButton, QScrollArea, QSplitter, QStackedWidget, QVBoxLayout, QWidget,
 )
 
@@ -170,6 +170,7 @@ class SetupWindow(QMainWindow):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.verticalScrollBar().setSingleStep(24)
         body = QWidget()
         body_lay = QVBoxLayout(body)
         body_lay.setContentsMargins(0, 0, 8, 0)
@@ -328,7 +329,7 @@ class SetupWindow(QMainWindow):
         self.proj_name = QLineEdit()
         self.proj_name.setPlaceholderText("my_project")
         self.proj_lang = ui.Segmented(["C", "C++"], "C++")
-        self.proj_std = QComboBox()
+        self.proj_std = ui.ComboBox()
         self.proj_std.addItems(toolchain.CPP_STANDARDS)
         self.proj_std.setCurrentText(toolchain.DEFAULT_STANDARD["cpp"])
         self.proj_lang.changed.connect(self._proj_lang_changed)

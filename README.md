@@ -16,7 +16,7 @@ A small Python app that sets up a complete **GCC** development environment for C
 
 ## Start
 
-For the version number, rely on the [latest GitHub release](https://github.com/yassinox12834/cdevkit/releases/latest). It is the reference; the badge above reads from it, and the files in this folder may be ahead of the last release. This README describes version **1.3.0**, and every version is listed in [CHANGELOG.md](CHANGELOG.md).
+For the version number, rely on the [latest GitHub release](https://github.com/yassinox12834/cdevkit/releases/latest). It is the reference; the badge above reads from it, and the files in this folder may be ahead of the last release. This README describes version **1.4.0**, and every version is listed in [CHANGELOG.md](CHANGELOG.md).
 
 You'll need:
 
@@ -94,19 +94,41 @@ A **Cancel** button under the pages stops whatever is running, and any command t
 
 Open a project folder or a single `.c` or `.cpp` file, pick C or C++ and the standard (C89 to C23, C++98 to C++26), choose warnings and optimisation, then press **F5**. The exact GCC command is shown above the output. Double-click an error to jump to that line in VS Code. Standards your GCC is too old for are hidden. Crashes are explained in words (access violation, stack overflow, missing DLL...).
 
-**Open folder...** shows the folder in an explorer on the left, like VS Code's: C, C++ and header files each have their own icon, and a **green dot** marks every file that defines `main()`, the ones **F5** can build and run. Click a file to make it the current one, double-click it to open it in VS Code, right-click for Run, Build and Show in file manager. Opening a folder picks its first runnable file, so **F5** works straight away. `build/`, hidden folders and empty folders are left out; tick **Show other files** to see everything else. The tree follows the disk: new, renamed and deleted files show up by themselves, and a `main()` you add in VS Code gets its dot when you come back to the launcher. The folder is remembered, and `launcher_app.py <folder>` opens one directly.
+**Open folder...** shows the folder in an explorer on the left, like VS Code's: C, C++ and header files each have their own icon, and a **green dot** marks every file that defines `main()`, the ones **F5** can build and run. Click a file to make it the current one, double-click it to open it in VS Code, right-click for Run, **Run as** (any of the run modes below), Build and Show in file manager. Opening a folder picks its first runnable file, so **F5** works straight away. `build/`, hidden folders and empty folders are left out; tick **Show other files** to see everything else. The tree follows the disk: new, renamed and deleted files show up by themselves, and a `main()` you add in VS Code gets its dot when you come back to the launcher. The folder is remembered, and `launcher_app.py <folder>` opens one directly.
 
 | Shortcut | Action |
 |---|---|
 | `Ctrl+O` | Open a file |
 | `Ctrl+Shift+O` | Open a folder |
 | `Ctrl+B` | Build only |
-| `F5` | Run (rebuilds first if a source, an included header, an option or the compiler changed) |
+| `F5` | Do what the run mode says (rebuilds first if a source, an included header, an option or the compiler changed) |
 | `Shift+F5` | Stop the running program or the build |
 
 The executable goes into a `build/` folder next to your source file, with a small `<name>.stamp.json` that records the command, the GCC version and the headers your code includes. That is how **F5** knows when to rebuild: changing `-O0` to `-O2`, a header in an `-Iinclude` folder or the compiler all trigger a new build, not only editing the `.c` or `.cpp` file.
 
-For programs that read input (`scanf`, `std::cin`), type the input in the **Input** box, or switch on **Run in a separate terminal**. A program that prints a lot does not slow the window down: if output arrives faster than it can be shown, the oldest waiting part is skipped and the log says so.
+### Run modes
+
+**What F5 does** in the *Run* section picks one of seven modes. The big button at the top takes the mode's name (*Run*, *Make exe*, *Check*...), and the right-click menu of the explorer has them all under **Run as**.
+
+| Mode | What it does | Output goes to |
+|---|---|---|
+| **Run here** | Builds if needed, runs in the Output panel. The **Input** box is sent to stdin. | `build/<name>` |
+| **Run in a terminal** | Runs in its own terminal window: for programs that ask for input as they go (`scanf`, `std::cin`). | `build/<name>` |
+| **Make a standalone executable** | Builds an optimised (`-O2`), stripped (`-s`), statically linked executable and does not run it. It works on another computer with the same system, without GCC. **Show executable** opens its folder. | `dist/<name>` (`.exe` on Windows) |
+| **Make a standalone executable and run it** | The same, then starts it in a terminal with your normal environment, without GCC's folders on PATH, the way someone double-clicking it would. If it runs there, it really is standalone. | `dist/<name>` |
+| **Check against expected output** | Runs with the **Input** box (or `<name>.in` next to the file) and compares what it prints with the **Expected output** box (or `<name>.out` / `<name>.ans`), like an online judge. Says *Accepted*, or the first line that differs. Spaces at line ends and blank lines at the end are ignored, nothing else. | `build/<name>` |
+| **Benchmark** | Runs the program 2 to 1000 times with its output hidden, then shows the fastest, median, mean and slowest run. Choose `-O2` first: it warns if you measure a `-O0` build. | `build/<name>` |
+| **Debug in a terminal** | Builds a `-O0 -g` copy and opens it in GDB (LLDB on macOS) in a terminal. GDB comes with the Classic pack. | `build/<name>-debug` |
+
+Every mode keeps its own executable and its own rebuild record, so switching between *Run here* and *Make a standalone executable* does not rebuild each time. `dist/` is left out of the explorer, like `build/`.
+
+About the standalone executable:
+
+- **Windows**: fully static, so it needs none of MSYS2's DLLs. It is not signed, so SmartScreen may show the "unrecognised app" warning on other PCs (*More info* → *Run anyway*).
+- **Linux**: fully static, so it runs on another Linux of the same architecture.
+- **macOS**: Apple does not allow fully static programs. The GCC runtime (`libgcc`, `libstdc++`) is linked in, and the system libraries come from macOS itself, so it runs on other Macs with the same processor type.
+
+A program that prints a lot does not slow the window down: if output arrives faster than it can be shown, the oldest waiting part is skipped and the log says so.
 
 ## Common problems
 
@@ -133,14 +155,14 @@ python -m venv .venv
 .venv/bin/python setup_app.py                    # or launcher_app.py
 ```
 
-Run the tests (111 of them, including GUI tests drawn off screen, so no window opens):
+Run the tests (125 of them, including GUI tests drawn off screen, so no window opens):
 
 ```
 QT_QPA_PLATFORM=offscreen python -m unittest discover tests     # PowerShell: $env:QT_QPA_PLATFORM="offscreen"
 python tests/smoke.py                                           # needs GCC, CMake and Ninja
 ```
 
-The GUI tests also measure how long the window stops responding while output floods in, so a freeze shows up as a failing test. CI runs everything on Windows, macOS and Linux with Python 3.10 and 3.13.
+The GUI tests also measure how long the window stops responding while output floods in and while a 2 400-file folder is scanned, so a freeze shows up as a failing test. CI runs everything on Windows, macOS and Linux with Python 3.10 and 3.13.
 
 PySide6 is kept below 6.12 in `requirements.txt`: version 6.12.0 crashes after about a thousand Qt callbacks on Python 3.10. Lift the cap once a 6.12.x release passes `tests/test_gui.py`.
 
@@ -154,7 +176,7 @@ _common.bat / .sh     Shared by the start files: finds or downloads Python, inst
 devkit/
   packs.py            The packs, with per-system package names. Edit this to add tools.
   installer.py        Detects and installs (winget, MSYS2, Homebrew, apt, dnf, pacman, VS Code)
-  toolchain.py        Finds GCC and builds the command line
+  toolchain.py        Finds GCC, builds the command line, the run modes and the output check
   project.py          Scans a folder for the launcher's explorer and finds the files with main()
   project_template.py The "New project" CMake template
   vscode_settings.py  Safe merge into VS Code's settings.json
