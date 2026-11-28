@@ -465,8 +465,11 @@ class LauncherWindowTests(unittest.TestCase):
         self.assertFalse(self.window.b_show.isHidden())
         if not system.IS_MAC:
             import subprocess
+            # No PATH at all, so a missing DLL would show. Windows refuses a completely empty
+            # environment (WinError 87): it needs SystemRoot, which is not a program folder.
+            bare = {"SystemRoot": os.environ["SystemRoot"]} if system.IS_WINDOWS else {}
             self.assertIn("standalone", subprocess.run([str(exe)], capture_output=True, text=True,
-                                                       env={}).stdout)   # no PATH at all: really standalone
+                                                       env=bare).stdout)
 
     def test_check_mode_accepts_and_rejects(self):
         self.source("twice.c", '#include <stdio.h>\nint main(void){int n;scanf("%d",&n);'
